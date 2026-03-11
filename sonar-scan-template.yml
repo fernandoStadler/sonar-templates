@@ -130,7 +130,7 @@ steps:
       SONAR_VERSION="5.0.1.3006"
       INSTALL_DIR="$HOME/.sonar/sonar-scanner"
 
-      if [ -f "$INSTALL_DIR/bin/sonar-scanner" ]; then
+      if [ -f "$INSTALL_DIR/bin/sonar-scanner.bat" ]; then
         echo "sonar-scanner já instalado"
         echo "##vso[task.prependpath]$INSTALL_DIR/bin"
         exit 0
@@ -154,9 +154,10 @@ steps:
   - bash: |
       set -e
       export PATH="$HOME/.sonar/sonar-scanner/bin:$PATH"
+      SONAR_CMD="$HOME/.sonar/sonar-scanner/bin/sonar-scanner.bat"
 
-      if ! command -v sonar-scanner &>/dev/null; then
-        echo "##[error]sonar-scanner não encontrado em $HOME/.sonar/sonar-scanner/bin"
+      if [ ! -f "$SONAR_CMD" ]; then
+        echo "##[error]sonar-scanner.bat não encontrado"
         ls "$HOME/.sonar/sonar-scanner/bin" || echo "Pasta não existe"
         exit 1
       fi
@@ -188,7 +189,7 @@ steps:
         cpp)        LANG_PROPS="-Dsonar.language=c++"  ;;
       esac
 
-      sonar-scanner \
+      "$SONAR_CMD" \
         -Dsonar.projectKey="$PROJECT_KEY" \
         -Dsonar.projectName="$PROJECT_NAME" \
         -Dsonar.host.url="$SONAR_URL" \
