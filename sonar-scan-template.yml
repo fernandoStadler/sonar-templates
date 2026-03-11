@@ -125,7 +125,7 @@ steps:
   - bash: |
       set -e
       SONAR_VERSION="5.0.1.3006"
-      INSTALL_DIR="/d/sonar-scanner"
+      INSTALL_DIR="$HOME/.sonar/sonar-scanner"
 
       if [ -f "$INSTALL_DIR/bin/sonar-scanner" ]; then
         echo "sonar-scanner já instalado"
@@ -134,14 +134,15 @@ steps:
       fi
 
       echo "Baixando sonar-scanner $SONAR_VERSION para Windows..."
-      mkdir -p "$INSTALL_DIR"
+      mkdir -p "$HOME/.sonar"
 
       curl -sSL \
         "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_VERSION}-windows.zip" \
         -o "/tmp/sonar-scanner.zip"
 
       unzip -q "/tmp/sonar-scanner.zip" -d "/tmp/"
-      cp -r "/tmp/sonar-scanner-${SONAR_VERSION}-windows/." "$INSTALL_DIR/"
+      rm -rf "$INSTALL_DIR"
+      mv "/tmp/sonar-scanner-${SONAR_VERSION}-windows" "$INSTALL_DIR"
 
       echo "##vso[task.prependpath]$INSTALL_DIR/bin"
       echo "Instalado em: $INSTALL_DIR"
@@ -149,11 +150,11 @@ steps:
 
   - bash: |
       set -e
-      export PATH="/d/sonar-scanner/bin:$PATH"
+      export PATH="$HOME/.sonar/sonar-scanner/bin:$PATH"
 
       if ! command -v sonar-scanner &>/dev/null; then
-        echo "##[error]sonar-scanner não encontrado em /d/sonar-scanner/bin"
-        ls /d/sonar-scanner/bin || echo "Pasta não existe"
+        echo "##[error]sonar-scanner não encontrado em $HOME/.sonar/sonar-scanner/bin"
+        ls "$HOME/.sonar/sonar-scanner/bin" || echo "Pasta não existe"
         exit 1
       fi
 
