@@ -1,0 +1,323 @@
+# =============================================================
+# REPOSITÓRIO: sonar-templates (repositório centralizado)
+# ARQUIVO: sonar-scan-template.yml
+#
+# Este arquivo é o TEMPLATE reutilizável do SonarQube.
+# Outros repositórios chamam este template via "extends" ou
+# "resources + template".
+# =============================================================
+
+parameters:
+  - name: sonarProjectKey
+    type: string
+    displayName: "Chave única do projeto no SonarQube"
+
+  - name: sonarProjectName
+    type: string
+    displayName: "Nome do projeto no SonarQube"
+
+  - name: sonarHostUrl
+    type: string
+    default: "http://localhost:9000"
+    displayName: "URL do servidor SonarQube"
+
+  - name: sonarTokenSecret
+    type: string
+    default: "SONAR_TOKEN"
+    displayName: "Nome da variável secreta com o token do SonarQube"
+
+  - name: buildCommand
+    type: string
+    default: ""
+    displayName: "Comando de build (opcional - deixe vazio para auto-detectar)"
+
+  - name: extraSonarProperties
+    type: string
+    default: ""
+    displayName: "Propriedades extras para o sonar-scanner (ex: sonar.exclusions=...)"
+
+  - name: nodeVersion
+    type: string
+    default: "18.x"
+    displayName: "Versão do Node.js (usado se linguagem JS/TS for detectada)"
+
+  - name: javaVersion
+    type: string
+    default: "17"
+    displayName: "Versão do Java (usado se linguagem Java/Kotlin for detectada)"
+
+  - name: dotnetVersion
+    type: string
+    default: "7.x"
+    displayName: "Versão do .NET (usado se linguagem C# for detectada)"
+
+steps:
+
+  # ------------------------------------------------------------------
+  # STEP 1: Detectar linguagem dominante do repositório
+  # ------------------------------------------------------------------
+  - bash: |
+      echo "##[section]Detectando linguagem do projeto..."
+
+      JAVA_COUNT=$(find . -name "*.java" -o -name "*.kt" -o -name "pom.xml" -o -name "build.gradle" 2>/dev/null | wc -l)
+      CSHARP_COUNT=$(find . -name "*.cs" -o -name "*.csproj" -o -name "*.sln" 2>/dev/null | wc -l)
+      JS_COUNT=$(find . -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "package.json" 2>/dev/null | grep -v node_modules | wc -l)
+      PYTHON_COUNT=$(find . -name "*.py" 2>/dev/null | wc -l)
+      PHP_COUNT=$(find . -name "*.php" 2>/dev/null | wc -l)
+      GO_COUNT=$(find . -name "*.go" 2>/dev/null | wc -l)
+      RUBY_COUNT=$(find . -name "*.rb" 2>/dev/null | wc -l)
+      CPP_COUNT=$(find . -name "*.cpp" -o -name "*.c" -o -name "*.h" 2>/dev/null | wc -l)
+
+      echo "Java/Kotlin:  $JAVA_COUNT arquivos"
+      echo "C#/.NET:      $CSHARP_COUNT arquivos"
+      echo "JS/TS:        $JS_COUNT arquivos"
+      echo "Python:       $PYTHON_COUNT arquivos"
+      echo "PHP:          $PHP_COUNT arquivos"
+      echo "Go:           $GO_COUNT arquivos"
+      echo "Ruby:         $RUBY_COUNT arquivos"
+      echo "C/C++:        $CPP_COUNT arquivos"
+
+      # Determina linguagem dominante
+      MAX=0
+      LANG="generic"
+
+      [ "$JAVA_COUNT"   -gt "$MAX" ] && MAX=$JAVA_COUNT   && LANG="java"
+      [ "$CSHARP_COUNT" -gt "$MAX" ] && MAX=$CSHARP_COUNT && LANG="csharp"
+      [ "$JS_COUNT"     -gt "$MAX" ] && MAX=$JS_COUNT     && LANG="javascript"
+      [ "$PYTHON_COUNT" -gt "$MAX" ] && MAX=$PYTHON_COUNT && LANG="python"
+      [ "$PHP_COUNT"    -gt "$MAX" ] && MAX=$PHP_COUNT    && LANG="php"
+      [ "$GO_COUNT"     -gt "$MAX" ] && MAX=$GO_COUNT     && LANG="go"
+      [ "$RUBY_COUNT"   -gt "$MAX" ] && MAX=$RUBY_COUNT   && LANG="ruby"
+      [ "$CPP_COUNT"    -gt "$MAX" ] && MAX=$CPP_COUNT    && LANG="cpp"
+
+      # Detecta se é TypeScript especificamente
+      TS_COUNT=$(find . -name "*.ts" -o -name "*.tsx" 2>/dev/null | grep -v node_modules | wc -l)
+      if [ "$LANG" = "javascript" ] && [ "$TS_COUNT" -gt "0" ]; then
+        LANG="typescript"
+      fi
+
+      echo "##[section]Linguagem detectada: $LANG"
+      echo "##vso[task.setvariable variable=DETECTED_LANGUAGE;isOutput=true]$LANG"
+      echo "##vso[task.setvariable variable=DETECTED_LANGUAGE]$LANG"
+    displayName: "🔍 Detectar Linguagem do Projeto"
+    name: detectLang
+
+  # ------------------------------------------------------------------
+  # STEP 2a: Setup Java (se Java/Kotlin)
+  # ------------------------------------------------------------------
+  - task: JavaToolInstaller@0
+    condition: or(eq(variables['DETECTED_LANGUAGE'], 'java'), contains('${{ parameters.buildCommand }}', 'mvn'), contains('${{ parameters.buildCommand }}', 'gradle'))
+    inputs:
+      versionSpec: "${{ parameters.javaVersion }}"
+      jdkArchitectureOption: "x64"
+      jdkSourceOption: "PreInstalled"
+    displayName: "☕ Setup Java"
+
+  # ------------------------------------------------------------------
+  # STEP 2b: Setup Node.js (se JS/TS)
+  # ------------------------------------------------------------------
+  - task: NodeTool@0
+    condition: or(eq(variables['DETECTED_LANGUAGE'], 'javascript'), eq(variables['DETECTED_LANGUAGE'], 'typescript'))
+    inputs:
+      versionSpec: "${{ parameters.nodeVersion }}"
+    displayName: "🟢 Setup Node.js"
+
+  # ------------------------------------------------------------------
+  # STEP 2c: Setup .NET (se C#)
+  # ------------------------------------------------------------------
+  - task: UseDotNet@2
+    condition: eq(variables['DETECTED_LANGUAGE'], 'csharp')
+    inputs:
+      version: "${{ parameters.dotnetVersion }}"
+    displayName: "🔷 Setup .NET"
+
+  # ------------------------------------------------------------------
+  # STEP 3: Build do projeto (linguagem-específico)
+  # ------------------------------------------------------------------
+  - bash: |
+      set -e
+      LANG="$(DETECTED_LANGUAGE)"
+      CUSTOM_CMD="${{ parameters.buildCommand }}"
+
+      if [ -n "$CUSTOM_CMD" ]; then
+        echo "Executando build customizado: $CUSTOM_CMD"
+        eval "$CUSTOM_CMD"
+        exit 0
+      fi
+
+      echo "Executando build automático para linguagem: $LANG"
+
+      case "$LANG" in
+        java)
+          if [ -f "pom.xml" ]; then
+            echo "Maven detectado"
+            mvn clean verify -DskipTests --batch-mode
+          elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+            echo "Gradle detectado"
+            chmod +x ./gradlew 2>/dev/null || true
+            ./gradlew build -x test || gradle build -x test
+          fi
+          ;;
+        csharp)
+          if [ -f "*.sln" ] || ls *.sln 1>/dev/null 2>&1; then
+            dotnet restore
+            dotnet build --no-restore
+          else
+            find . -name "*.csproj" | head -1 | xargs dotnet build
+          fi
+          ;;
+        javascript|typescript)
+          if [ -f "package.json" ]; then
+            npm ci 2>/dev/null || npm install
+            if grep -q '"build"' package.json; then
+              npm run build 2>/dev/null || true
+            fi
+          fi
+          ;;
+        python)
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          fi
+          ;;
+        *)
+          echo "Linguagem $LANG não requer build específico para SonarQube Community"
+          ;;
+      esac
+    displayName: "🔨 Build do Projeto"
+
+  # ------------------------------------------------------------------
+  # STEP 4: Instalar sonar-scanner CLI
+  # ------------------------------------------------------------------
+  - bash: |
+      set -e
+      SONAR_VERSION="5.0.1.3006"
+
+      if command -v sonar-scanner &>/dev/null; then
+        echo "sonar-scanner já instalado: $(sonar-scanner --version 2>&1 | head -1)"
+        exit 0
+      fi
+
+      echo "Baixando sonar-scanner $SONAR_VERSION..."
+      wget -q "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_VERSION}-linux.zip" -O /tmp/sonar-scanner.zip
+      unzip -q /tmp/sonar-scanner.zip -d /tmp/
+      sudo mv /tmp/sonar-scanner-${SONAR_VERSION}-linux /opt/sonar-scanner
+      sudo ln -sf /opt/sonar-scanner/bin/sonar-scanner /usr/local/bin/sonar-scanner
+      echo "sonar-scanner instalado com sucesso"
+    displayName: "📦 Instalar sonar-scanner CLI"
+
+  # ------------------------------------------------------------------
+  # STEP 5: Executar análise SonarQube
+  # ------------------------------------------------------------------
+  - bash: |
+      set -e
+
+      LANG="$(DETECTED_LANGUAGE)"
+      PROJECT_KEY="${{ parameters.sonarProjectKey }}"
+      PROJECT_NAME="${{ parameters.sonarProjectName }}"
+      SONAR_URL="${{ parameters.sonarHostUrl }}"
+      EXTRA="${{ parameters.extraSonarProperties }}"
+
+      echo "##[section]Iniciando análise SonarQube"
+      echo "Projeto:    $PROJECT_KEY"
+      echo "Linguagem:  $LANG"
+      echo "Servidor:   $SONAR_URL"
+
+      # Monta propriedades de acordo com a linguagem
+      LANG_PROPS=""
+      case "$LANG" in
+        java)
+          LANG_PROPS="-Dsonar.language=java"
+          # Inclui binários compilados se existirem
+          [ -d "target" ]   && LANG_PROPS="$LANG_PROPS -Dsonar.java.binaries=target/classes"
+          [ -d "build/classes" ] && LANG_PROPS="$LANG_PROPS -Dsonar.java.binaries=build/classes"
+          ;;
+        csharp)
+          LANG_PROPS="-Dsonar.language=cs"
+          ;;
+        javascript)
+          LANG_PROPS="-Dsonar.language=js"
+          ;;
+        typescript)
+          LANG_PROPS="-Dsonar.language=ts"
+          ;;
+        python)
+          LANG_PROPS="-Dsonar.language=py"
+          ;;
+        php)
+          LANG_PROPS="-Dsonar.language=php"
+          ;;
+        go)
+          LANG_PROPS="-Dsonar.language=go"
+          ;;
+        ruby)
+          LANG_PROPS="-Dsonar.language=ruby"
+          ;;
+        cpp)
+          LANG_PROPS="-Dsonar.language=c++"
+          ;;
+        *)
+          echo "Linguagem genérica - SonarQube fará auto-detecção"
+          ;;
+      esac
+
+      # Executa o scan
+      sonar-scanner \
+        -Dsonar.projectKey="$PROJECT_KEY" \
+        -Dsonar.projectName="$PROJECT_NAME" \
+        -Dsonar.host.url="$SONAR_URL" \
+        -Dsonar.token="$(SONAR_TOKEN)" \
+        -Dsonar.sources=. \
+        -Dsonar.scm.provider=git \
+        -Dsonar.sourceEncoding=UTF-8 \
+        $LANG_PROPS \
+        $EXTRA
+
+      echo "##[section]✅ Análise SonarQube concluída!"
+    env:
+      SONAR_TOKEN: $(${{ parameters.sonarTokenSecret }})
+    displayName: "📊 Executar Análise SonarQube"
+
+  # ------------------------------------------------------------------
+  # STEP 6: Verificar Quality Gate
+  # ------------------------------------------------------------------
+  - bash: |
+      set -e
+
+      SONAR_URL="${{ parameters.sonarHostUrl }}"
+      PROJECT_KEY="${{ parameters.sonarProjectKey }}"
+
+      echo "Verificando Quality Gate para: $PROJECT_KEY"
+
+      # Aguarda processamento (até 5 minutos)
+      for i in $(seq 1 30); do
+        RESPONSE=$(curl -sf -u "$(SONAR_TOKEN):" \
+          "$SONAR_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" || echo '{"projectStatus":{"status":"NONE"}}')
+
+        STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])" 2>/dev/null || echo "NONE")
+
+        if [ "$STATUS" != "NONE" ] && [ "$STATUS" != "PENDING" ]; then
+          echo "Quality Gate Status: $STATUS"
+          break
+        fi
+
+        echo "Aguardando processamento... ($i/30)"
+        sleep 10
+      done
+
+      if [ "$STATUS" = "OK" ] || [ "$STATUS" = "SUCCESS" ]; then
+        echo "##[section]✅ Quality Gate: PASSOU"
+      elif [ "$STATUS" = "WARN" ]; then
+        echo "##vso[task.logissue type=warning]⚠️ Quality Gate: AVISO - verifique o SonarQube"
+      elif [ "$STATUS" = "ERROR" ]; then
+        echo "##vso[task.logissue type=error]❌ Quality Gate: FALHOU"
+        echo "##vso[task.complete result=Failed;]Quality Gate falhou. Acesse: $SONAR_URL/dashboard?id=$PROJECT_KEY"
+        exit 1
+      else
+        echo "##vso[task.logissue type=warning]⚠️ Status desconhecido: $STATUS"
+      fi
+
+      echo ""
+      echo "🔗 Dashboard: $SONAR_URL/dashboard?id=$PROJECT_KEY"
+    env:
+      SONAR_TOKEN: $(${{ parameters.sonarTokenSecret }})
+    displayName: "🚦 Verificar Quality Gate"
