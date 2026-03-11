@@ -89,8 +89,7 @@ steps:
       -Dsonar.sourceEncoding=UTF-8 \
       ${{ parameters.extraSonarProperties }}
 
-  env:
-    SONAR_TOKEN: $(SONAR_TOKEN)
+
 
   displayName: "📊 Run SonarQube Analysis"
 
