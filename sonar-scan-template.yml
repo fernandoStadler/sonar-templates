@@ -1,52 +1,32 @@
 parameters:
   - name: sonarProjectKey
     type: string
-    displayName: "Chave única do projeto no SonarQube"
-
   - name: sonarProjectName
     type: string
-    displayName: "Nome do projeto no SonarQube"
-
   - name: sonarHostUrl
     type: string
     default: "http://localhost:9000"
-    displayName: "URL do servidor SonarQube"
-
   - name: sonarTokenSecret
     type: string
     default: "SONAR_TOKEN"
-    displayName: "Nome da variável secreta com o token do SonarQube"
-
   - name: buildCommand
     type: string
     default: ""
-    displayName: "Comando de build (opcional - deixe vazio para auto-detectar)"
-
   - name: extraSonarProperties
     type: string
     default: ""
-    displayName: "Propriedades extras para o sonar-scanner (ex: sonar.exclusions=...)"
-
   - name: nodeVersion
     type: string
     default: "18.x"
-    displayName: "Versão do Node.js (usado se linguagem JS/TS for detectada)"
-
   - name: javaVersion
     type: string
     default: "17"
-    displayName: "Versão do Java (usado se linguagem Java/Kotlin for detectada)"
-
   - name: dotnetVersion
     type: string
     default: "7.x"
-    displayName: "Versão do .NET (usado se linguagem C# for detectada)"
 
 steps:
 
-  # ------------------------------------------------------------------
-  # STEP 1: Detectar linguagem dominante do repositório
-  # ------------------------------------------------------------------
   - bash: |
       echo "##[section]Detectando linguagem do projeto..."
 
@@ -59,18 +39,8 @@ steps:
       RUBY_COUNT=$(find . -name "*.rb" 2>/dev/null | wc -l)
       CPP_COUNT=$(find . -name "*.cpp" -o -name "*.c" -o -name "*.h" 2>/dev/null | wc -l)
 
-      echo "Java/Kotlin:  $JAVA_COUNT arquivos"
-      echo "C#/.NET:      $CSHARP_COUNT arquivos"
-      echo "JS/TS:        $JS_COUNT arquivos"
-      echo "Python:       $PYTHON_COUNT arquivos"
-      echo "PHP:          $PHP_COUNT arquivos"
-      echo "Go:           $GO_COUNT arquivos"
-      echo "Ruby:         $RUBY_COUNT arquivos"
-      echo "C/C++:        $CPP_COUNT arquivos"
-
       MAX=0
       LANG="generic"
-
       [ "$JAVA_COUNT"   -gt "$MAX" ] && MAX=$JAVA_COUNT   && LANG="java"
       [ "$CSHARP_COUNT" -gt "$MAX" ] && MAX=$CSHARP_COUNT && LANG="csharp"
       [ "$JS_COUNT"     -gt "$MAX" ] && MAX=$JS_COUNT     && LANG="javascript"
@@ -85,15 +55,12 @@ steps:
         LANG="typescript"
       fi
 
-      echo "##[section]Linguagem detectada: $LANG"
+      echo "Linguagem detectada: $LANG"
       echo "##vso[task.setvariable variable=DETECTED_LANGUAGE;isOutput=true]$LANG"
       echo "##vso[task.setvariable variable=DETECTED_LANGUAGE]$LANG"
     displayName: "🔍 Detectar Linguagem do Projeto"
     name: detectLang
 
-  # ------------------------------------------------------------------
-  # STEP 2a: Setup Java (se Java/Kotlin)
-  # ------------------------------------------------------------------
   - task: JavaToolInstaller@0
     condition: or(eq(variables['DETECTED_LANGUAGE'], 'java'), contains('${{ parameters.buildCommand }}', 'mvn'), contains('${{ parameters.buildCommand }}', 'gradle'))
     inputs:
@@ -102,39 +69,27 @@ steps:
       jdkSourceOption: "PreInstalled"
     displayName: "☕ Setup Java"
 
-  # ------------------------------------------------------------------
-  # STEP 2b: Setup Node.js (se JS/TS)
-  # ------------------------------------------------------------------
   - task: NodeTool@0
     condition: or(eq(variables['DETECTED_LANGUAGE'], 'javascript'), eq(variables['DETECTED_LANGUAGE'], 'typescript'))
     inputs:
       versionSpec: "${{ parameters.nodeVersion }}"
     displayName: "🟢 Setup Node.js"
 
-  # ------------------------------------------------------------------
-  # STEP 2c: Setup .NET (se C#)
-  # ------------------------------------------------------------------
   - task: UseDotNet@2
     condition: eq(variables['DETECTED_LANGUAGE'], 'csharp')
     inputs:
       version: "${{ parameters.dotnetVersion }}"
     displayName: "🔷 Setup .NET"
 
-  # ------------------------------------------------------------------
-  # STEP 3: Build do projeto
-  # ------------------------------------------------------------------
   - bash: |
       set -e
       LANG="$(DETECTED_LANGUAGE)"
       CUSTOM_CMD="${{ parameters.buildCommand }}"
 
       if [ -n "$CUSTOM_CMD" ]; then
-        echo "Executando build customizado: $CUSTOM_CMD"
         eval "$CUSTOM_CMD"
         exit 0
       fi
-
-      echo "Executando build automático para linguagem: $LANG"
 
       case "$LANG" in
         java)
@@ -147,8 +102,7 @@ steps:
           ;;
         csharp)
           if ls *.sln 1>/dev/null 2>&1; then
-            dotnet restore
-            dotnet build --no-restore
+            dotnet restore && dotnet build --no-restore
           else
             find . -name "*.csproj" | head -1 | xargs dotnet build
           fi
@@ -156,29 +110,22 @@ steps:
         javascript|typescript)
           if [ -f "package.json" ]; then
             npm ci 2>/dev/null || npm install
-            if grep -q '"build"' package.json; then
-              npm run build 2>/dev/null || true
-            fi
+            grep -q '"build"' package.json && npm run build 2>/dev/null || true
           fi
           ;;
         python)
-          if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          fi
+          [ -f "requirements.txt" ] && pip install -r requirements.txt
           ;;
         *)
-          echo "Linguagem $LANG não requer build específico"
+          echo "Sem build necessário para: $LANG"
           ;;
       esac
     displayName: "🔨 Build do Projeto"
 
-  # ------------------------------------------------------------------
-  # STEP 4: Instalar sonar-scanner CLI
-  # ------------------------------------------------------------------
   - bash: |
       set -e
       SONAR_VERSION="5.0.1.3006"
-      INSTALL_DIR="$HOME/.sonar/sonar-scanner"
+      INSTALL_DIR="/d/sonar-scanner"
 
       if [ -f "$INSTALL_DIR/bin/sonar-scanner" ]; then
         echo "sonar-scanner já instalado"
@@ -186,45 +133,27 @@ steps:
         exit 0
       fi
 
-      echo "Baixando sonar-scanner $SONAR_VERSION..."
-      mkdir -p "$HOME/.sonar"
+      echo "Baixando sonar-scanner $SONAR_VERSION para Windows..."
+      mkdir -p "$INSTALL_DIR"
 
-      case "$(uname -s)" in
-        MINGW*|CYGWIN*|MSYS*)
-          OS="windows"
-          ;;
-        Darwin*)
-          OS="macosx"
-          ;;
-        *)
-          OS="linux"
-          ;;
-      esac
+      curl -sSL \
+        "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_VERSION}-windows.zip" \
+        -o "/tmp/sonar-scanner.zip"
 
-      URL="https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_VERSION}-${OS}.zip"
-      echo "Baixando: $URL"
+      unzip -q "/tmp/sonar-scanner.zip" -d "/tmp/"
+      cp -r "/tmp/sonar-scanner-${SONAR_VERSION}-windows/." "$INSTALL_DIR/"
 
-      curl -sSL "$URL" -o "$HOME/.sonar/sonar-scanner.zip"
-      unzip -q "$HOME/.sonar/sonar-scanner.zip" -d "$HOME/.sonar/"
-      mv "$HOME/.sonar/sonar-scanner-${SONAR_VERSION}-${OS}" "$INSTALL_DIR"
-
-      echo "sonar-scanner instalado em: $INSTALL_DIR"
       echo "##vso[task.prependpath]$INSTALL_DIR/bin"
+      echo "Instalado em: $INSTALL_DIR"
     displayName: "📦 Instalar sonar-scanner CLI"
 
-  # ------------------------------------------------------------------
-  # STEP 5: Executar análise SonarQube
-  # ------------------------------------------------------------------
   - bash: |
       set -e
-
-      # Localiza o sonar-scanner (compatível com Windows/Linux/Mac)
-      export PATH="$HOME/.sonar/sonar-scanner/bin:$PATH"
-      SONAR_BIN=$(find "$HOME/.sonar" -name "sonar-scanner" -not -name "*.bat" 2>/dev/null | head -1)
-      [ -n "$SONAR_BIN" ] && export PATH="$(dirname $SONAR_BIN):$PATH"
+      export PATH="/d/sonar-scanner/bin:$PATH"
 
       if ! command -v sonar-scanner &>/dev/null; then
-        echo "##[error]sonar-scanner não encontrado."
+        echo "##[error]sonar-scanner não encontrado em /d/sonar-scanner/bin"
+        ls /d/sonar-scanner/bin || echo "Pasta não existe"
         exit 1
       fi
 
@@ -234,11 +163,9 @@ steps:
       SONAR_URL="${{ parameters.sonarHostUrl }}"
       EXTRA="${{ parameters.extraSonarProperties }}"
 
-      echo "##[section]Iniciando análise SonarQube"
-      echo "Projeto:    $PROJECT_KEY"
-      echo "Linguagem:  $LANG"
-      echo "Servidor:   $SONAR_URL"
-      echo "Scanner:    $(which sonar-scanner)"
+      echo "Projeto:   $PROJECT_KEY"
+      echo "Linguagem: $LANG"
+      echo "Servidor:  $SONAR_URL"
 
       LANG_PROPS=""
       case "$LANG" in
@@ -247,33 +174,14 @@ steps:
           [ -d "target" ]        && LANG_PROPS="$LANG_PROPS -Dsonar.java.binaries=target/classes"
           [ -d "build/classes" ] && LANG_PROPS="$LANG_PROPS -Dsonar.java.binaries=build/classes"
           ;;
-        csharp)
-          LANG_PROPS="-Dsonar.language=cs"
-          ;;
-        javascript)
-          LANG_PROPS="-Dsonar.language=js"
-          ;;
-        typescript)
-          LANG_PROPS="-Dsonar.language=ts"
-          ;;
-        python)
-          LANG_PROPS="-Dsonar.language=py"
-          ;;
-        php)
-          LANG_PROPS="-Dsonar.language=php"
-          ;;
-        go)
-          LANG_PROPS="-Dsonar.language=go"
-          ;;
-        ruby)
-          LANG_PROPS="-Dsonar.language=ruby"
-          ;;
-        cpp)
-          LANG_PROPS="-Dsonar.language=c++"
-          ;;
-        *)
-          echo "Linguagem genérica - SonarQube fará auto-detecção"
-          ;;
+        csharp)     LANG_PROPS="-Dsonar.language=cs"   ;;
+        javascript) LANG_PROPS="-Dsonar.language=js"   ;;
+        typescript) LANG_PROPS="-Dsonar.language=ts"   ;;
+        python)     LANG_PROPS="-Dsonar.language=py"   ;;
+        php)        LANG_PROPS="-Dsonar.language=php"  ;;
+        go)         LANG_PROPS="-Dsonar.language=go"   ;;
+        ruby)       LANG_PROPS="-Dsonar.language=ruby" ;;
+        cpp)        LANG_PROPS="-Dsonar.language=c++"  ;;
       esac
 
       sonar-scanner \
@@ -287,17 +195,13 @@ steps:
         $LANG_PROPS \
         $EXTRA
 
-      echo "##[section]✅ Análise SonarQube concluída!"
+      echo "✅ Análise concluída!"
     env:
       SONAR_TOKEN: $(SONAR_TOKEN)
     displayName: "📊 Executar Análise SonarQube"
 
-  # ------------------------------------------------------------------
-  # STEP 6: Verificar Quality Gate
-  # ------------------------------------------------------------------
   - bash: |
       set -e
-
       SONAR_URL="${{ parameters.sonarHostUrl }}"
       PROJECT_KEY="${{ parameters.sonarProjectKey }}"
 
@@ -308,30 +212,30 @@ steps:
           "$SONAR_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" \
           || echo '{"projectStatus":{"status":"NONE"}}')
 
-        STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])" 2>/dev/null || echo "NONE")
+        STATUS=$(echo "$RESPONSE" | python3 -c \
+          "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])" \
+          2>/dev/null || echo "NONE")
 
         if [ "$STATUS" != "NONE" ] && [ "$STATUS" != "PENDING" ]; then
-          echo "Quality Gate Status: $STATUS"
           break
         fi
 
-        echo "Aguardando processamento... ($i/30)"
+        echo "Aguardando... ($i/30)"
         sleep 10
       done
 
+      echo "Quality Gate: $STATUS"
+
       if [ "$STATUS" = "OK" ] || [ "$STATUS" = "SUCCESS" ]; then
         echo "##[section]✅ Quality Gate: PASSOU"
-      elif [ "$STATUS" = "WARN" ]; then
-        echo "##vso[task.logissue type=warning]⚠️ Quality Gate: AVISO"
       elif [ "$STATUS" = "ERROR" ]; then
-        echo "##vso[task.logissue type=error]❌ Quality Gate: FALHOU"
-        echo "##vso[task.complete result=Failed;]Quality Gate falhou. Acesse: $SONAR_URL/dashboard?id=$PROJECT_KEY"
+        echo "##vso[task.complete result=Failed;]Quality Gate FALHOU"
         exit 1
       else
         echo "##vso[task.logissue type=warning]⚠️ Status: $STATUS"
       fi
 
-      echo "🔗 Dashboard: $SONAR_URL/dashboard?id=$PROJECT_KEY"
+      echo "🔗 $SONAR_URL/dashboard?id=$PROJECT_KEY"
     env:
       SONAR_TOKEN: $(SONAR_TOKEN)
     displayName: "🚦 Verificar Quality Gate"
