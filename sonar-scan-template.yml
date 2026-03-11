@@ -27,8 +27,17 @@ parameters:
 
 steps:
 
-  - bash: |
-      echo "##[section]Detectando linguagem do projeto..."
+  - powershell: |
+      $gitBin = "C:\Program Files\Git\bin"
+      $env:Path = "$gitBin;" + $env:Path
+      Write-Host "PATH atualizado com Git Bash"
+      & "C:\Program Files\Git\bin\bash.exe" --version
+    displayName: "⚙️ Configurar Git Bash"
+
+  - powershell: |
+      $gitBash = "C:\Program Files\Git\bin\bash.exe"
+      $script = @'
+      echo "Detectando linguagem do projeto..."
 
       JAVA_COUNT=$(find . -name "*.java" -o -name "*.kt" -o -name "pom.xml" -o -name "build.gradle" 2>/dev/null | wc -l)
       CSHARP_COUNT=$(find . -name "*.cs" -o -name "*.csproj" -o -name "*.sln" 2>/dev/null | wc -l)
@@ -58,40 +67,29 @@ steps:
       echo "Linguagem detectada: $LANG"
       echo "##vso[task.setvariable variable=DETECTED_LANGUAGE;isOutput=true]$LANG"
       echo "##vso[task.setvariable variable=DETECTED_LANGUAGE]$LANG"
+'@
+      $tmpFile = "$env:TEMP\detect_lang.sh"
+      $script | Out-File -FilePath $tmpFile -Encoding utf8 -NoNewline
+      & $gitBash $tmpFile
     displayName: "🔍 Detectar Linguagem do Projeto"
     name: detectLang
 
-  - task: JavaToolInstaller@0
-    condition: or(eq(variables['DETECTED_LANGUAGE'], 'java'), contains('${{ parameters.buildCommand }}', 'mvn'), contains('${{ parameters.buildCommand }}', 'gradle'))
-    inputs:
-      versionSpec: "${{ parameters.javaVersion }}"
-      jdkArchitectureOption: "x64"
-      jdkSourceOption: "PreInstalled"
-    displayName: "☕ Setup Java"
+  - powershell: |
+      $gitBash = "C:\Program Files\Git\bin\bash.exe"
+      $lang = "$(DETECTED_LANGUAGE)"
+      $customCmd = "${{ parameters.buildCommand }}"
 
-  - task: NodeTool@0
-    condition: or(eq(variables['DETECTED_LANGUAGE'], 'javascript'), eq(variables['DETECTED_LANGUAGE'], 'typescript'))
-    inputs:
-      versionSpec: "${{ parameters.nodeVersion }}"
-    displayName: "🟢 Setup Node.js"
-
-  - task: UseDotNet@2
-    condition: eq(variables['DETECTED_LANGUAGE'], 'csharp')
-    inputs:
-      version: "${{ parameters.dotnetVersion }}"
-    displayName: "🔷 Setup .NET"
-
-  - bash: |
+      $script = @"
       set +e
-      LANG="$(DETECTED_LANGUAGE)"
-      CUSTOM_CMD="${{ parameters.buildCommand }}"
+      LANG="$lang"
+      CUSTOM_CMD="$customCmd"
 
-      if [ -n "$CUSTOM_CMD" ]; then
-        eval "$CUSTOM_CMD"
+      if [ -n "`$CUSTOM_CMD" ]; then
+        eval "`$CUSTOM_CMD"
         exit 0
       fi
 
-      case "$LANG" in
+      case "`$LANG" in
         java)
           if [ -f "pom.xml" ]; then
             mvn clean verify -DskipTests --batch-mode
@@ -117,67 +115,87 @@ steps:
           [ -f "requirements.txt" ] && pip install -r requirements.txt || true
           ;;
         *)
-          echo "Sem build necessário para: $LANG"
+          echo "Sem build necessário para: `$LANG"
           ;;
       esac
 
       echo "Build finalizado"
       exit 0
+"@
+      $tmpFile = "$env:TEMP\build.sh"
+      $script | Out-File -FilePath $tmpFile -Encoding utf8 -NoNewline
+      & $gitBash $tmpFile
     displayName: "🔨 Build do Projeto"
 
-  - bash: |
-      set -e
-      SONAR_VERSION="5.0.1.3006"
-      INSTALL_DIR="$HOME/.sonar/sonar-scanner"
+  - powershell: |
+      $gitBash = "C:\Program Files\Git\bin\bash.exe"
+      $sonarVersion = "5.0.1.3006"
+      $installDir = "$env:USERPROFILE\.sonar\sonar-scanner" -replace "\\", "/"
+      $installDirWin = "$env:USERPROFILE\.sonar\sonar-scanner"
 
-      if [ -f "$INSTALL_DIR/bin/sonar-scanner.bat" ]; then
+      $script = @"
+      set -e
+      SONAR_VERSION="$sonarVersion"
+      INSTALL_DIR="$installDir"
+
+      if [ -f "`$INSTALL_DIR/bin/sonar-scanner.bat" ]; then
         echo "sonar-scanner já instalado"
-        echo "##vso[task.prependpath]$INSTALL_DIR/bin"
+        echo "##vso[task.prependpath]`$(echo `$INSTALL_DIR/bin | sed 's|/|\\\\|g')"
         exit 0
       fi
 
-      echo "Baixando sonar-scanner $SONAR_VERSION para Windows..."
-      mkdir -p "$HOME/.sonar"
+      echo "Baixando sonar-scanner `$SONAR_VERSION para Windows..."
+      mkdir -p "`$HOME/.sonar"
 
       curl -sSL \
-        "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_VERSION}-windows.zip" \
+        "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-`${SONAR_VERSION}-windows.zip" \
         -o "/tmp/sonar-scanner.zip"
 
       unzip -q "/tmp/sonar-scanner.zip" -d "/tmp/"
-      rm -rf "$INSTALL_DIR"
-      mv "/tmp/sonar-scanner-${SONAR_VERSION}-windows" "$INSTALL_DIR"
+      rm -rf "`$INSTALL_DIR"
+      mv "/tmp/sonar-scanner-`${SONAR_VERSION}-windows" "`$INSTALL_DIR"
 
-      echo "##vso[task.prependpath]$INSTALL_DIR/bin"
-      echo "Instalado em: $INSTALL_DIR"
+      echo "Instalado em: `$INSTALL_DIR"
+"@
+      $tmpFile = "$env:TEMP\install_sonar.sh"
+      $script | Out-File -FilePath $tmpFile -Encoding utf8 -NoNewline
+      & $gitBash $tmpFile
+
+      # Adiciona ao PATH do processo atual
+      $env:Path = "$installDirWin\bin;" + $env:Path
+      Write-Host "##vso[task.prependpath]$installDirWin\bin"
     displayName: "📦 Instalar sonar-scanner CLI"
 
-  - bash: |
-      set -e
-      export PATH="$HOME/.sonar/sonar-scanner/bin:$PATH"
-      SONAR_CMD="$HOME/.sonar/sonar-scanner/bin/sonar-scanner.bat"
+  - powershell: |
+      $gitBash = "C:\Program Files\Git\bin\bash.exe"
+      $sonarCmd = "$env:USERPROFILE\.sonar\sonar-scanner\bin\sonar-scanner.bat" -replace "\\", "/"
+      $projectKey = "${{ parameters.sonarProjectKey }}"
+      $projectName = "${{ parameters.sonarProjectName }}"
+      $sonarUrl = "${{ parameters.sonarHostUrl }}"
+      $extra = "${{ parameters.extraSonarProperties }}"
+      $lang = "$(DETECTED_LANGUAGE)"
+      $sonarToken = "$(SONAR_TOKEN)"
 
-      if [ ! -f "$SONAR_CMD" ]; then
-        echo "##[error]sonar-scanner.bat não encontrado"
-        ls "$HOME/.sonar/sonar-scanner/bin" || echo "Pasta não existe"
+      $script = @"
+      set -e
+      SONAR_CMD="$sonarCmd"
+      LANG="$lang"
+
+      if [ ! -f "`$SONAR_CMD" ]; then
+        echo "##[error]sonar-scanner.bat não encontrado em `$SONAR_CMD"
         exit 1
       fi
 
-      LANG="$(DETECTED_LANGUAGE)"
-      PROJECT_KEY="${{ parameters.sonarProjectKey }}"
-      PROJECT_NAME="${{ parameters.sonarProjectName }}"
-      SONAR_URL="${{ parameters.sonarHostUrl }}"
-      EXTRA="${{ parameters.extraSonarProperties }}"
-
-      echo "Projeto:   $PROJECT_KEY"
-      echo "Linguagem: $LANG"
-      echo "Servidor:  $SONAR_URL"
+      echo "Projeto:   $projectKey"
+      echo "Linguagem: `$LANG"
+      echo "Servidor:  $sonarUrl"
 
       LANG_PROPS=""
-      case "$LANG" in
+      case "`$LANG" in
         java)
           LANG_PROPS="-Dsonar.language=java"
-          [ -d "target" ]        && LANG_PROPS="$LANG_PROPS -Dsonar.java.binaries=target/classes"
-          [ -d "build/classes" ] && LANG_PROPS="$LANG_PROPS -Dsonar.java.binaries=build/classes"
+          [ -d "target" ]        && LANG_PROPS="`$LANG_PROPS -Dsonar.java.binaries=target/classes"
+          [ -d "build/classes" ] && LANG_PROPS="`$LANG_PROPS -Dsonar.java.binaries=build/classes"
           ;;
         csharp)     LANG_PROPS="-Dsonar.language=cs"   ;;
         javascript) LANG_PROPS="-Dsonar.language=js"   ;;
@@ -189,58 +207,73 @@ steps:
         cpp)        LANG_PROPS="-Dsonar.language=c++"  ;;
       esac
 
-      "$SONAR_CMD" \
-        -Dsonar.projectKey="$PROJECT_KEY" \
-        -Dsonar.projectName="$PROJECT_NAME" \
-        -Dsonar.host.url="$SONAR_URL" \
-        -Dsonar.token="$SONAR_TOKEN" \
+      "`$SONAR_CMD" \
+        -Dsonar.projectKey="$projectKey" \
+        -Dsonar.projectName="$projectName" \
+        -Dsonar.host.url="$sonarUrl" \
+        -Dsonar.token="$sonarToken" \
         -Dsonar.sources=. \
         -Dsonar.scm.provider=git \
         -Dsonar.sourceEncoding=UTF-8 \
-        $LANG_PROPS \
-        $EXTRA
+        `$LANG_PROPS \
+        $extra
 
       echo "✅ Análise concluída!"
+"@
+      $tmpFile = "$env:TEMP\run_sonar.sh"
+      $script | Out-File -FilePath $tmpFile -Encoding utf8 -NoNewline
+      & $gitBash $tmpFile
     env:
       SONAR_TOKEN: $(SONAR_TOKEN)
     displayName: "📊 Executar Análise SonarQube"
 
-  - bash: |
+  - powershell: |
+      $gitBash = "C:\Program Files\Git\bin\bash.exe"
+      $sonarUrl = "${{ parameters.sonarHostUrl }}"
+      $projectKey = "${{ parameters.sonarProjectKey }}"
+      $sonarToken = "$(SONAR_TOKEN)"
+
+      $script = @"
       set -e
-      SONAR_URL="${{ parameters.sonarHostUrl }}"
-      PROJECT_KEY="${{ parameters.sonarProjectKey }}"
+      SONAR_URL="$sonarUrl"
+      PROJECT_KEY="$projectKey"
+      SONAR_TOKEN="$sonarToken"
 
-      echo "Verificando Quality Gate para: $PROJECT_KEY"
+      echo "Verificando Quality Gate para: `$PROJECT_KEY"
 
-      for i in $(seq 1 30); do
-        RESPONSE=$(curl -sf -u "$SONAR_TOKEN:" \
-          "$SONAR_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" \
+      for i in `$(seq 1 30); do
+        RESPONSE=`$(curl -sf -u "`$SONAR_TOKEN:" \
+          "`$SONAR_URL/api/qualitygates/project_status?projectKey=`$PROJECT_KEY" \
           || echo '{"projectStatus":{"status":"NONE"}}')
 
-        STATUS=$(echo "$RESPONSE" | python3 -c \
+        STATUS=`$(echo "`$RESPONSE" | python3 -c \
           "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])" \
           2>/dev/null || echo "NONE")
 
-        if [ "$STATUS" != "NONE" ] && [ "$STATUS" != "PENDING" ]; then
+        if [ "`$STATUS" != "NONE" ] && [ "`$STATUS" != "PENDING" ]; then
           break
         fi
 
-        echo "Aguardando... ($i/30)"
+        echo "Aguardando... (`$i/30)"
         sleep 10
       done
 
-      echo "Quality Gate: $STATUS"
+      echo "Quality Gate: `$STATUS"
 
-      if [ "$STATUS" = "OK" ] || [ "$STATUS" = "SUCCESS" ]; then
+      if [ "`$STATUS" = "OK" ] || [ "`$STATUS" = "SUCCESS" ]; then
         echo "##[section]✅ Quality Gate: PASSOU"
-      elif [ "$STATUS" = "ERROR" ]; then
+      elif [ "`$STATUS" = "ERROR" ]; then
         echo "##vso[task.complete result=Failed;]Quality Gate FALHOU"
         exit 1
       else
-        echo "##vso[task.logissue type=warning]⚠️ Status: $STATUS"
+        echo "##vso[task.logissue type=warning]⚠️ Status: `$STATUS"
       fi
 
-      echo "🔗 $SONAR_URL/dashboard?id=$PROJECT_KEY"
+      echo "🔗 `$SONAR_URL/dashboard?id=`$PROJECT_KEY"
+"@
+      $tmpFile = "$env:TEMP\quality_gate.sh"
+      $script | Out-File -FilePath $tmpFile -Encoding utf8 -NoNewline
+      & $gitBash $tmpFile
     env:
       SONAR_TOKEN: $(SONAR_TOKEN)
     displayName: "🚦 Verificar Quality Gate"
