@@ -28,99 +28,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: "🔍 Detectar Linguagem"
-        id: detect-lang
-        run: |
-          JAVA_COUNT=$(find . \( -name "*.java" -o -name "*.kt" -o -name "pom.xml" -o -name "build.gradle" \) 2>/dev/null | wc -l)
-          CSHARP_COUNT=$(find . \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | wc -l)
-          JS_COUNT=$(find . \( -name "*.js" -o -name "*.jsx" -o -name "package.json" \) 2>/dev/null | grep -v node_modules | wc -l)
-          TS_COUNT=$(find . \( -name "*.ts" -o -name "*.tsx" \) 2>/dev/null | grep -v node_modules | wc -l)
-          PYTHON_COUNT=$(find . -name "*.py" 2>/dev/null | wc -l)
-          PHP_COUNT=$(find . -name "*.php" 2>/dev/null | wc -l)
-          GO_COUNT=$(find . -name "*.go" 2>/dev/null | wc -l)
-          RUBY_COUNT=$(find . -name "*.rb" 2>/dev/null | wc -l)
-          CPP_COUNT=$(find . \( -name "*.cpp" -o -name "*.c" -o -name "*.h" \) 2>/dev/null | wc -l)
-
-          MAX=0
-          LANG="generic"
-          [ "$JAVA_COUNT"   -gt "$MAX" ] && MAX=$JAVA_COUNT   && LANG="java"
-          [ "$CSHARP_COUNT" -gt "$MAX" ] && MAX=$CSHARP_COUNT && LANG="csharp"
-          [ "$JS_COUNT"     -gt "$MAX" ] && MAX=$JS_COUNT     && LANG="javascript"
-          [ "$TS_COUNT"     -gt "$MAX" ] && MAX=$TS_COUNT     && LANG="typescript"
-          [ "$PYTHON_COUNT" -gt "$MAX" ] && MAX=$PYTHON_COUNT && LANG="python"
-          [ "$PHP_COUNT"    -gt "$MAX" ] && MAX=$PHP_COUNT    && LANG="php"
-          [ "$GO_COUNT"     -gt "$MAX" ] && MAX=$GO_COUNT     && LANG="go"
-          [ "$RUBY_COUNT"   -gt "$MAX" ] && MAX=$RUBY_COUNT   && LANG="ruby"
-          [ "$CPP_COUNT"    -gt "$MAX" ] && MAX=$CPP_COUNT    && LANG="cpp"
-
-          echo "Linguagem detectada: $LANG"
-          echo "lang=$LANG" >> $GITHUB_OUTPUT
-
-      - name: "☕ Setup Java"
-        if: steps.detect-lang.outputs.lang == 'java'
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: "🟢 Setup Node.js"
-        if: |
-          steps.detect-lang.outputs.lang == 'javascript' ||
-          steps.detect-lang.outputs.lang == 'typescript'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: "🔷 Setup .NET"
-        if: steps.detect-lang.outputs.lang == 'csharp'
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.x'
-
-      - name: "🐍 Setup Python"
-        if: steps.detect-lang.outputs.lang == 'python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: "🔨 Build do Projeto"
-        continue-on-error: true
-        run: |
-          LANG="${{ steps.detect-lang.outputs.lang }}"
-          echo "Build para linguagem: $LANG"
-
-          case "$LANG" in
-            java)
-              if [ -f "pom.xml" ]; then
-                mvn clean verify -DskipTests --batch-mode
-              elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-                chmod +x ./gradlew && ./gradlew build -x test
-              fi
-              ;;
-            csharp)
-              if ls *.sln 1>/dev/null 2>&1; then
-                dotnet restore && dotnet build --no-restore
-              else
-                find . -name "*.csproj" | head -1 | xargs dotnet build
-              fi
-              ;;
-            javascript|typescript)
-              if [ -f "package.json" ]; then
-                npm ci 2>/dev/null || npm install
-                grep -q '"build"' package.json && npm run build || true
-              fi
-              ;;
-            python)
-              [ -f "requirements.txt" ] && pip install -r requirements.txt || true
-              ;;
-            go)
-              go build ./... || true
-              ;;
-            *)
-              echo "Sem build necessário para: $LANG"
-              ;;
-          esac
-
       - name: "📊 SonarQube Scan"
         id: sonar
         uses: sonarsource/sonarqube-scan-action@v3
@@ -142,48 +49,30 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: "📊 Buscar Métricas do SonarQube"
+      - name: "📊 Buscar Métricas"
         id: metrics
         if: always()
         continue-on-error: true
         run: |
-          echo "Aguardando processamento do SonarQube..."
-          sleep 15
-
-          URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots"
-
-          echo "Buscando: $URL"
-
+          sleep 10
+          URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
           RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
 
-          echo "Resposta: $RESPONSE"
-
-          get_metric() {
-            VAL=$(echo "$RESPONSE" | jq -r --arg key "$1" \
-              '.component.measures[] | select(.metric == $key) | .value // "0"' 2>/dev/null)
-            [ -z "$VAL" ] && VAL="0"
-            echo "$VAL"
+          get() {
+            echo "$RESPONSE" | jq -r --arg k "$1" '.component.measures[]|select(.metric==$k)|.value//"0"' 2>/dev/null || echo "0"
           }
 
-          BUGS=$(get_metric "bugs")
-          VULNS=$(get_metric "vulnerabilities")
-          SMELLS=$(get_metric "code_smells")
-          COVERAGE=$(get_metric "coverage")
-          DUPS=$(get_metric "duplicated_lines_density")
-          LINES=$(get_metric "ncloc")
-          HOTSPOTS=$(get_metric "security_hotspots")
-          LANG="${{ steps.detect-lang.outputs.lang }}"
+          LANG=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc_language_distribution")|.value//"?"' 2>/dev/null | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
+          [ -z "$LANG" ] && LANG="?"
 
-          echo "bugs=$BUGS"             >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$VULNS" >> $GITHUB_OUTPUT
-          echo "code_smells=$SMELLS"    >> $GITHUB_OUTPUT
-          echo "coverage=$COVERAGE"     >> $GITHUB_OUTPUT
-          echo "duplications=$DUPS"     >> $GITHUB_OUTPUT
-          echo "lines=$LINES"           >> $GITHUB_OUTPUT
-          echo "hotspots=$HOTSPOTS"     >> $GITHUB_OUTPUT
-          echo "language=$LANG"         >> $GITHUB_OUTPUT
-
-          echo "✅ Bugs=$BUGS | Vulns=$VULNS | Smells=$SMELLS | Lines=$LINES | Lang=$LANG"
+          echo "bugs=$(get bugs)"                               >> $GITHUB_OUTPUT
+          echo "vulnerabilities=$(get vulnerabilities)"         >> $GITHUB_OUTPUT
+          echo "code_smells=$(get code_smells)"                 >> $GITHUB_OUTPUT
+          echo "coverage=$(get coverage)"                       >> $GITHUB_OUTPUT
+          echo "duplications=$(get duplicated_lines_density)"   >> $GITHUB_OUTPUT
+          echo "lines=$(get ncloc)"                             >> $GITHUB_OUTPUT
+          echo "hotspots=$(get security_hotspots)"              >> $GITHUB_OUTPUT
+          echo "language=$LANG"                                 >> $GITHUB_OUTPUT
 
       - name: "✅ Slack — Sucesso"
         if: success()
