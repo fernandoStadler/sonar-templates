@@ -145,6 +145,7 @@ jobs:
       - name: "📊 Buscar Métricas do SonarQube"
         id: metrics
         if: always()
+        continue-on-error: true
         run: |
           echo "Aguardando processamento do SonarQube..."
           sleep 15
@@ -153,33 +154,24 @@ jobs:
 
           echo "Buscando: $URL"
 
-          RESPONSE=$(curl -sf -u "${{ secrets.SONAR_TOKEN }}:" "$URL")
-          CURL_EXIT=$?
+          RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
 
-          echo "curl exit code: $CURL_EXIT"
           echo "Resposta: $RESPONSE"
 
-          if [ $CURL_EXIT -ne 0 ] || [ -z "$RESPONSE" ]; then
-            echo "Falha ao buscar métricas — usando valores zerados"
-            BUGS="N/A"; VULNS="N/A"; SMELLS="N/A"
-            COVERAGE="N/A"; DUPS="N/A"; LINES="N/A"; HOTSPOTS="N/A"
-          else
-            get_metric() {
-              VAL=$(echo "$RESPONSE" | jq -r --arg key "$1" \
-                '.component.measures[] | select(.metric == $key) | .value // "0"' 2>/dev/null)
-              [ -z "$VAL" ] && VAL="0"
-              echo "$VAL"
-            }
+          get_metric() {
+            VAL=$(echo "$RESPONSE" | jq -r --arg key "$1" \
+              '.component.measures[] | select(.metric == $key) | .value // "0"' 2>/dev/null)
+            [ -z "$VAL" ] && VAL="0"
+            echo "$VAL"
+          }
 
-            BUGS=$(get_metric "bugs")
-            VULNS=$(get_metric "vulnerabilities")
-            SMELLS=$(get_metric "code_smells")
-            COVERAGE=$(get_metric "coverage")
-            DUPS=$(get_metric "duplicated_lines_density")
-            LINES=$(get_metric "ncloc")
-            HOTSPOTS=$(get_metric "security_hotspots")
-          fi
-
+          BUGS=$(get_metric "bugs")
+          VULNS=$(get_metric "vulnerabilities")
+          SMELLS=$(get_metric "code_smells")
+          COVERAGE=$(get_metric "coverage")
+          DUPS=$(get_metric "duplicated_lines_density")
+          LINES=$(get_metric "ncloc")
+          HOTSPOTS=$(get_metric "security_hotspots")
           LANG="${{ steps.detect-lang.outputs.lang }}"
 
           echo "bugs=$BUGS"             >> $GITHUB_OUTPUT
