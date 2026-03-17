@@ -28,6 +28,99 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: "🔍 Detectar Linguagem"
+        id: detect-lang
+        run: |
+          JAVA_COUNT=$(find . \( -name "*.java" -o -name "*.kt" -o -name "pom.xml" -o -name "build.gradle" \) 2>/dev/null | wc -l)
+          CSHARP_COUNT=$(find . \( -name "*.cs" -o -name "*.csproj" -o -name "*.sln" \) 2>/dev/null | wc -l)
+          JS_COUNT=$(find . \( -name "*.js" -o -name "*.jsx" -o -name "package.json" \) 2>/dev/null | grep -v node_modules | wc -l)
+          TS_COUNT=$(find . \( -name "*.ts" -o -name "*.tsx" \) 2>/dev/null | grep -v node_modules | wc -l)
+          PYTHON_COUNT=$(find . -name "*.py" 2>/dev/null | wc -l)
+          PHP_COUNT=$(find . -name "*.php" 2>/dev/null | wc -l)
+          GO_COUNT=$(find . -name "*.go" 2>/dev/null | wc -l)
+          RUBY_COUNT=$(find . -name "*.rb" 2>/dev/null | wc -l)
+          CPP_COUNT=$(find . \( -name "*.cpp" -o -name "*.c" -o -name "*.h" \) 2>/dev/null | wc -l)
+
+          MAX=0
+          LANG="generic"
+          [ "$JAVA_COUNT"   -gt "$MAX" ] && MAX=$JAVA_COUNT   && LANG="java"
+          [ "$CSHARP_COUNT" -gt "$MAX" ] && MAX=$CSHARP_COUNT && LANG="csharp"
+          [ "$JS_COUNT"     -gt "$MAX" ] && MAX=$JS_COUNT     && LANG="javascript"
+          [ "$TS_COUNT"     -gt "$MAX" ] && MAX=$TS_COUNT     && LANG="typescript"
+          [ "$PYTHON_COUNT" -gt "$MAX" ] && MAX=$PYTHON_COUNT && LANG="python"
+          [ "$PHP_COUNT"    -gt "$MAX" ] && MAX=$PHP_COUNT    && LANG="php"
+          [ "$GO_COUNT"     -gt "$MAX" ] && MAX=$GO_COUNT     && LANG="go"
+          [ "$RUBY_COUNT"   -gt "$MAX" ] && MAX=$RUBY_COUNT   && LANG="ruby"
+          [ "$CPP_COUNT"    -gt "$MAX" ] && MAX=$CPP_COUNT    && LANG="cpp"
+
+          echo "Linguagem detectada: $LANG"
+          echo "lang=$LANG" >> $GITHUB_OUTPUT
+
+      - name: "☕ Setup Java"
+        if: steps.detect-lang.outputs.lang == 'java'
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: "🟢 Setup Node.js"
+        if: |
+          steps.detect-lang.outputs.lang == 'javascript' ||
+          steps.detect-lang.outputs.lang == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: "🔷 Setup .NET"
+        if: steps.detect-lang.outputs.lang == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: "🐍 Setup Python"
+        if: steps.detect-lang.outputs.lang == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: "🔨 Build do Projeto"
+        continue-on-error: true
+        run: |
+          LANG="${{ steps.detect-lang.outputs.lang }}"
+          echo "Build para linguagem: $LANG"
+
+          case "$LANG" in
+            java)
+              if [ -f "pom.xml" ]; then
+                mvn clean verify -DskipTests --batch-mode
+              elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+                chmod +x ./gradlew && ./gradlew build -x test
+              fi
+              ;;
+            csharp)
+              if ls *.sln 1>/dev/null 2>&1; then
+                dotnet restore && dotnet build --no-restore
+              else
+                find . -name "*.csproj" | head -1 | xargs dotnet build
+              fi
+              ;;
+            javascript|typescript)
+              if [ -f "package.json" ]; then
+                npm ci 2>/dev/null || npm install
+                grep -q '"build"' package.json && npm run build || true
+              fi
+              ;;
+            python)
+              [ -f "requirements.txt" ] && pip install -r requirements.txt || true
+              ;;
+            go)
+              go build ./... || true
+              ;;
+            *)
+              echo "Sem build necessário para: $LANG"
+              ;;
+          esac
+
       - name: "📊 SonarQube Scan"
         id: sonar
         uses: sonarsource/sonarqube-scan-action@v3
@@ -54,26 +147,33 @@ jobs:
         if: always()
         run: |
           RESPONSE=$(curl -sf -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/measures/component\
-            ?component=${{ inputs.sonar-project-key }}\
-            &metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots")
+            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots" \
+            || echo '{"component":{"measures":[]}}')
 
-          extract() {
-            echo "$RESPONSE" | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          measures = {m['metric']: m.get('value','0') for m in data['component']['measures']}
-          print(measures.get('$1', '0'))
-          "
+          get_metric() {
+            echo "$RESPONSE" | jq -r --arg key "$1" \
+              '.component.measures[] | select(.metric == $key) | .value // "0"' 2>/dev/null || echo "0"
           }
 
-          echo "bugs=$(extract bugs)"                                         >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$(extract vulnerabilities)"                   >> $GITHUB_OUTPUT
-          echo "code_smells=$(extract code_smells)"                           >> $GITHUB_OUTPUT
-          echo "coverage=$(extract coverage)"                                 >> $GITHUB_OUTPUT
-          echo "duplications=$(extract duplicated_lines_density)"             >> $GITHUB_OUTPUT
-          echo "lines=$(extract ncloc)"                                       >> $GITHUB_OUTPUT
-          echo "hotspots=$(extract security_hotspots)"                        >> $GITHUB_OUTPUT
+          BUGS=$(get_metric "bugs");           [ -z "$BUGS" ]         && BUGS="0"
+          VULNS=$(get_metric "vulnerabilities"); [ -z "$VULNS" ]      && VULNS="0"
+          SMELLS=$(get_metric "code_smells");  [ -z "$SMELLS" ]       && SMELLS="0"
+          COVERAGE=$(get_metric "coverage");   [ -z "$COVERAGE" ]     && COVERAGE="0"
+          DUPS=$(get_metric "duplicated_lines_density"); [ -z "$DUPS" ] && DUPS="0"
+          LINES=$(get_metric "ncloc");         [ -z "$LINES" ]        && LINES="0"
+          HOTSPOTS=$(get_metric "security_hotspots"); [ -z "$HOTSPOTS" ] && HOTSPOTS="0"
+          LANG="${{ steps.detect-lang.outputs.lang }}"
+
+          echo "bugs=$BUGS"               >> $GITHUB_OUTPUT
+          echo "vulnerabilities=$VULNS"   >> $GITHUB_OUTPUT
+          echo "code_smells=$SMELLS"      >> $GITHUB_OUTPUT
+          echo "coverage=$COVERAGE"       >> $GITHUB_OUTPUT
+          echo "duplications=$DUPS"       >> $GITHUB_OUTPUT
+          echo "lines=$LINES"             >> $GITHUB_OUTPUT
+          echo "hotspots=$HOTSPOTS"       >> $GITHUB_OUTPUT
+          echo "language=$LANG"           >> $GITHUB_OUTPUT
+
+          echo "✅ Métricas: Bugs=$BUGS | Vulns=$VULNS | Smells=$SMELLS | Lines=$LINES | Lang=$LANG"
 
       - name: "✅ Slack — Sucesso"
         if: success()
@@ -84,18 +184,15 @@ jobs:
             "blocks": [
               {
                 "type": "header",
-                "text": {
-                  "type": "plain_text",
-                  "text": "✅ Quality Gate PASSOU"
-                }
+                "text": { "type": "plain_text", "text": "✅ Quality Gate PASSOU" }
               },
               {
                 "type": "section",
                 "fields": [
                   { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
+                  { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
                   { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
-                  { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" },
-                  { "type": "mrkdwn", "text": "*Commit:*\n`${{ github.sha }}`" }
+                  { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
                 ]
               },
               {
@@ -133,18 +230,15 @@ jobs:
             "blocks": [
               {
                 "type": "header",
-                "text": {
-                  "type": "plain_text",
-                  "text": "❌ Quality Gate FALHOU"
-                }
+                "text": { "type": "plain_text", "text": "❌ Quality Gate FALHOU" }
               },
               {
                 "type": "section",
                 "fields": [
                   { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
+                  { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
                   { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
-                  { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" },
-                  { "type": "mrkdwn", "text": "*Commit:*\n`${{ github.sha }}`" }
+                  { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
                 ]
               },
               {
