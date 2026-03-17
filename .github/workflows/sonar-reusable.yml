@@ -146,34 +146,39 @@ jobs:
         id: metrics
         if: always()
         run: |
-          RESPONSE=$(curl -sf -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots" \
-            || echo '{"component":{"measures":[]}}')
+          URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots"
+
+          echo "Buscando métricas em: $URL"
+
+          RESPONSE=$(curl -sf -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
+
+          echo "Resposta: $RESPONSE"
 
           get_metric() {
-            echo "$RESPONSE" | jq -r --arg key "$1" \
-              '.component.measures[] | select(.metric == $key) | .value // "0"' 2>/dev/null || echo "0"
+            VAL=$(echo "$RESPONSE" | jq -r --arg key "$1" '.component.measures[] | select(.metric == $key) | .value // "0"' 2>/dev/null)
+            [ -z "$VAL" ] && VAL="0"
+            echo "$VAL"
           }
 
-          BUGS=$(get_metric "bugs");           [ -z "$BUGS" ]         && BUGS="0"
-          VULNS=$(get_metric "vulnerabilities"); [ -z "$VULNS" ]      && VULNS="0"
-          SMELLS=$(get_metric "code_smells");  [ -z "$SMELLS" ]       && SMELLS="0"
-          COVERAGE=$(get_metric "coverage");   [ -z "$COVERAGE" ]     && COVERAGE="0"
-          DUPS=$(get_metric "duplicated_lines_density"); [ -z "$DUPS" ] && DUPS="0"
-          LINES=$(get_metric "ncloc");         [ -z "$LINES" ]        && LINES="0"
-          HOTSPOTS=$(get_metric "security_hotspots"); [ -z "$HOTSPOTS" ] && HOTSPOTS="0"
+          BUGS=$(get_metric "bugs")
+          VULNS=$(get_metric "vulnerabilities")
+          SMELLS=$(get_metric "code_smells")
+          COVERAGE=$(get_metric "coverage")
+          DUPS=$(get_metric "duplicated_lines_density")
+          LINES=$(get_metric "ncloc")
+          HOTSPOTS=$(get_metric "security_hotspots")
           LANG="${{ steps.detect-lang.outputs.lang }}"
 
-          echo "bugs=$BUGS"               >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$VULNS"   >> $GITHUB_OUTPUT
-          echo "code_smells=$SMELLS"      >> $GITHUB_OUTPUT
-          echo "coverage=$COVERAGE"       >> $GITHUB_OUTPUT
-          echo "duplications=$DUPS"       >> $GITHUB_OUTPUT
-          echo "lines=$LINES"             >> $GITHUB_OUTPUT
-          echo "hotspots=$HOTSPOTS"       >> $GITHUB_OUTPUT
-          echo "language=$LANG"           >> $GITHUB_OUTPUT
+          echo "bugs=$BUGS"             >> $GITHUB_OUTPUT
+          echo "vulnerabilities=$VULNS" >> $GITHUB_OUTPUT
+          echo "code_smells=$SMELLS"    >> $GITHUB_OUTPUT
+          echo "coverage=$COVERAGE"     >> $GITHUB_OUTPUT
+          echo "duplications=$DUPS"     >> $GITHUB_OUTPUT
+          echo "lines=$LINES"           >> $GITHUB_OUTPUT
+          echo "hotspots=$HOTSPOTS"     >> $GITHUB_OUTPUT
+          echo "language=$LANG"         >> $GITHUB_OUTPUT
 
-          echo "✅ Métricas: Bugs=$BUGS | Vulns=$VULNS | Smells=$SMELLS | Lines=$LINES | Lang=$LANG"
+          echo "Métricas: Bugs=$BUGS | Vulns=$VULNS | Smells=$SMELLS | Lines=$LINES | Coverage=$COVERAGE% | Lang=$LANG"
 
       - name: "✅ Slack — Sucesso"
         if: success()
