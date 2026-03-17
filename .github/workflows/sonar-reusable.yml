@@ -28,15 +28,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: "🔑 Bypass LocalTunnel"
-        continue-on-error: true
-        run: |
-          LT_BYPASS=$(curl -s https://loca.lt/mytunnelpassword)
-          echo "LT_BYPASS=$LT_BYPASS" >> $GITHUB_ENV
-          echo "IP obtido: $LT_BYPASS"
-          # Faz o primeiro acesso passando o bypass para liberar o túnel
-          curl -s -H "bypass-tunnel-reminder: $LT_BYPASS" "${{ secrets.SONAR_HOST_URL }}/api/system/status" || true
-
       - name: "📊 SonarQube Scan"
         id: sonar
         uses: sonarsource/sonarqube-scan-action@v3
