@@ -28,6 +28,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: "🔑 Bypass LocalTunnel"
+        continue-on-error: true
+        run: |
+          LT_BYPASS=$(curl -s https://loca.lt/mytunnelpassword)
+          echo "LT_BYPASS=$LT_BYPASS" >> $GITHUB_ENV
+          echo "IP obtido: $LT_BYPASS"
+          # Faz o primeiro acesso passando o bypass para liberar o túnel
+          curl -s -H "bypass-tunnel-reminder: $LT_BYPASS" "${{ secrets.SONAR_HOST_URL }}/api/system/status" || true
+
       - name: "📊 SonarQube Scan"
         id: sonar
         uses: sonarsource/sonarqube-scan-action@v3
@@ -65,14 +74,14 @@ jobs:
           LANG=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc_language_distribution")|.value//"?"' 2>/dev/null | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
           [ -z "$LANG" ] && LANG="?"
 
-          echo "bugs=$(get bugs)"                               >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$(get vulnerabilities)"         >> $GITHUB_OUTPUT
-          echo "code_smells=$(get code_smells)"                 >> $GITHUB_OUTPUT
-          echo "coverage=$(get coverage)"                       >> $GITHUB_OUTPUT
-          echo "duplications=$(get duplicated_lines_density)"   >> $GITHUB_OUTPUT
-          echo "lines=$(get ncloc)"                             >> $GITHUB_OUTPUT
-          echo "hotspots=$(get security_hotspots)"              >> $GITHUB_OUTPUT
-          echo "language=$LANG"                                 >> $GITHUB_OUTPUT
+          echo "bugs=$(get bugs)"                             >> $GITHUB_OUTPUT
+          echo "vulnerabilities=$(get vulnerabilities)"       >> $GITHUB_OUTPUT
+          echo "code_smells=$(get code_smells)"               >> $GITHUB_OUTPUT
+          echo "coverage=$(get coverage)"                     >> $GITHUB_OUTPUT
+          echo "duplications=$(get duplicated_lines_density)" >> $GITHUB_OUTPUT
+          echo "lines=$(get ncloc)"                           >> $GITHUB_OUTPUT
+          echo "hotspots=$(get security_hotspots)"            >> $GITHUB_OUTPUT
+          echo "language=$LANG"                               >> $GITHUB_OUTPUT
 
       - name: "✅ Slack — Sucesso"
         if: success()
