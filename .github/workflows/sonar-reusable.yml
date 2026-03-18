@@ -1,4 +1,4 @@
-name: SonarQube Scan - Reusable
+name: SonarQube Scan - Reusable 
 
 on:
   workflow_call:
@@ -49,112 +49,304 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-      - name: "🔎 Debug Métricas"
-        if: always()
-        run: |
-          echo "=== Testando conexão ==="
-          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/system/status"
-
-          echo ""
-          echo "=== Buscando métricas ==="
-          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,ncloc"
-
-          echo ""
-          echo "=== Verificando projeto ==="
-          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/projects/search?projects=${{ inputs.sonar-project-key }}"
-
       - name: "📊 Buscar Métricas"
         id: metrics
         if: always()
-        continue-on-error: true
+        shell: bash
         run: |
+          set +e
+
+          METRICS_URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
+
+          RESPONSE_FILE="$(mktemp)"
+          BODY_FILE="$(mktemp)"
+
+          echo "Consultando métricas do projeto: ${{ inputs.sonar-project-key }}"
+
+          success=0
           for i in $(seq 1 12); do
             echo "Tentativa $i/12..."
-            URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
-            RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
-            LINES=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc")|.value//"0"' 2>/dev/null)
-            if [ -n "$LINES" ] && [ "$LINES" != "0" ] && [ "$LINES" != "null" ]; then
-              echo "✅ Dados disponíveis após $i tentativas"
-              break
+
+            HTTP_CODE=$(curl -sS \
+              -u "${{ secrets.SONAR_TOKEN }}:" \
+              -o "$BODY_FILE" \
+              -w "%{http_code}" \
+              "$METRICS_URL")
+
+            echo "HTTP_CODE=$HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              if jq -e '.component.measures' "$BODY_FILE" >/dev/null 2>&1; then
+                cp "$BODY_FILE" "$RESPONSE_FILE"
+
+                LINES=$(jq -r '.component.measures[]? | select(.metric=="ncloc") | .value // "0"' "$RESPONSE_FILE" 2>/dev/null)
+                if [ -n "$LINES" ] && [ "$LINES" != "null" ] && [ "$LINES" != "0" ]; then
+                  echo "✅ Métricas disponíveis após $i tentativa(s)"
+                  success=1
+                  break
+                fi
+
+                echo "Resposta JSON válida, mas análise ainda não consolidada."
+              else
+                echo "Resposta 200, mas não veio JSON esperado da API."
+                echo "Prévia da resposta:"
+                head -c 300 "$BODY_FILE" || true
+                echo
+              fi
+            else
+              echo "Resposta HTTP inesperada: $HTTP_CODE"
+              echo "Prévia da resposta:"
+              head -c 300 "$BODY_FILE" || true
+              echo
             fi
-            echo "Aguardando processamento... ($i/12)"
+
             sleep 10
           done
 
-          get() {
-            echo "$RESPONSE" | jq -r --arg k "$1" '.component.measures[]|select(.metric==$k)|.value//"0"' 2>/dev/null || echo "0"
+          if [ "$success" -ne 1 ]; then
+            echo "⚠️ Não foi possível obter métricas consolidadas. Usando fallback seguro."
+            echo '{"component":{"measures":[]}}' > "$RESPONSE_FILE"
+          fi
+
+          get_metric() {
+            local key="$1"
+            local value
+            value=$(jq -r --arg k "$key" '
+              [
+                .component.measures[]? 
+                | select(.metric == $k) 
+                | .value
+              ][0] // "0"
+            ' "$RESPONSE_FILE" 2>/dev/null)
+
+            if [ -z "$value" ] || [ "$value" = "null" ]; then
+              value="0"
+            fi
+
+            echo "$value"
           }
 
-          LANG=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc_language_distribution")|.value//"?"' 2>/dev/null | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
-          [ -z "$LANG" ] && LANG="?"
+          LANGUAGE=$(jq -r '
+            [
+              .component.measures[]?
+              | select(.metric=="ncloc_language_distribution")
+              | .value
+            ][0] // ""
+          ' "$RESPONSE_FILE" 2>/dev/null)
 
-          echo "bugs=$(get bugs)"                             >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$(get vulnerabilities)"       >> $GITHUB_OUTPUT
-          echo "code_smells=$(get code_smells)"               >> $GITHUB_OUTPUT
-          echo "coverage=$(get coverage)"                     >> $GITHUB_OUTPUT
-          echo "duplications=$(get duplicated_lines_density)" >> $GITHUB_OUTPUT
-          echo "lines=$(get ncloc)"                           >> $GITHUB_OUTPUT
-          echo "hotspots=$(get security_hotspots)"            >> $GITHUB_OUTPUT
-          echo "language=$LANG"                               >> $GITHUB_OUTPUT
+          if [ -n "$LANGUAGE" ] && [ "$LANGUAGE" != "null" ]; then
+            LANGUAGE=$(echo "$LANGUAGE" | cut -d';' -f1 | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
+          fi
 
-          echo "✅ Bugs=$(get bugs) | Smells=$(get code_smells) | Lines=$(get ncloc) | Lang=$LANG"
+          if [ -z "$LANGUAGE" ] || [ "$LANGUAGE" = "null" ]; then
+            LANGUAGE="?"
+          fi
+
+          BUGS="$(get_metric bugs)"
+          VULNERABILITIES="$(get_metric vulnerabilities)"
+          CODE_SMELLS="$(get_metric code_smells)"
+          COVERAGE="$(get_metric coverage)"
+          DUPLICATIONS="$(get_metric duplicated_lines_density)"
+          LINES="$(get_metric ncloc)"
+          HOTSPOTS="$(get_metric security_hotspots)"
+
+          echo "bugs=$BUGS" >> "$GITHUB_OUTPUT"
+          echo "vulnerabilities=$VULNERABILITIES" >> "$GITHUB_OUTPUT"
+          echo "code_smells=$CODE_SMELLS" >> "$GITHUB_OUTPUT"
+          echo "coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
+          echo "duplications=$DUPLICATIONS" >> "$GITHUB_OUTPUT"
+          echo "lines=$LINES" >> "$GITHUB_OUTPUT"
+          echo "hotspots=$HOTSPOTS" >> "$GITHUB_OUTPUT"
+          echo "language=$LANGUAGE" >> "$GITHUB_OUTPUT"
+
+          echo "Resumo final:"
+          echo "bugs=$BUGS"
+          echo "vulnerabilities=$VULNERABILITIES"
+          echo "code_smells=$CODE_SMELLS"
+          echo "coverage=$COVERAGE"
+          echo "duplications=$DUPLICATIONS"
+          echo "lines=$LINES"
+          echo "hotspots=$HOTSPOTS"
+          echo "language=$LANGUAGE"
 
       - name: "✅ Slack — Sucesso"
         if: success()
+        shell: bash
         run: |
-          curl -sf -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-          -H "Content-Type: application/json" \
-          -d '{
+          payload=$(cat <<EOF
+          {
             "blocks": [
-              { "type": "header", "text": { "type": "plain_text", "text": "✅ Quality Gate PASSOU" } },
-              { "type": "section", "fields": [
-                { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
-                { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
-                { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
-                { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
-              ]},
-              { "type": "section", "fields": [
-                { "type": "mrkdwn", "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}" },
-                { "type": "mrkdwn", "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}" },
-                { "type": "mrkdwn", "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}" },
-                { "type": "mrkdwn", "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}" },
-                { "type": "mrkdwn", "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%" },
-                { "type": "mrkdwn", "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%" },
-                { "type": "mrkdwn", "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}" }
-              ]},
-              { "type": "actions", "elements": [
-                { "type": "button", "text": { "type": "plain_text", "text": "🔗 Ver no SonarQube" }, "url": "${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}", "style": "primary" }
-              ]}
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "✅ Quality Gate PASSOU"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Projeto:*\n${{ inputs.sonar-project-name }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Branch:*\n${{ github.ref_name }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Autor:*\n${{ github.actor }}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}"
+                  }
+                ]
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "🔗 Ver no SonarQube"
+                    },
+                    "url": "${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}",
+                    "style": "primary"
+                  }
+                ]
+              }
             ]
-          }'
+          }
+          EOF
+          )
+
+          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            --data "$payload"
 
       - name: "❌ Slack — Falha"
         if: failure()
+        shell: bash
         run: |
-          curl -sf -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-          -H "Content-Type: application/json" \
-          -d '{
+          payload=$(cat <<EOF
+          {
             "blocks": [
-              { "type": "header", "text": { "type": "plain_text", "text": "❌ Quality Gate FALHOU" } },
-              { "type": "section", "fields": [
-                { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
-                { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
-                { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
-                { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
-              ]},
-              { "type": "section", "fields": [
-                { "type": "mrkdwn", "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}" },
-                { "type": "mrkdwn", "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}" },
-                { "type": "mrkdwn", "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}" },
-                { "type": "mrkdwn", "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}" },
-                { "type": "mrkdwn", "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%" },
-                { "type": "mrkdwn", "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%" }
-              ]},
-              { "type": "actions", "elements": [
-                { "type": "button", "text": { "type": "plain_text", "text": "🔗 Ver Issues" }, "url": "${{ secrets.SONAR_HOST_URL }}/project/issues?id=${{ inputs.sonar-project-key }}&resolved=false", "style": "danger" }
-              ]}
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "❌ Quality Gate FALHOU"
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Projeto:*\n${{ inputs.sonar-project-name }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Branch:*\n${{ github.ref_name }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Autor:*\n${{ github.actor }}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}"
+                  }
+                ]
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "🔗 Ver Issues"
+                    },
+                    "url": "${{ secrets.SONAR_HOST_URL }}/project/issues?id=${{ inputs.sonar-project-key }}&resolved=false",
+                    "style": "danger"
+                  }
+                ]
+              }
             ]
-          }'
+          }
+          EOF
+          )
+
+          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            --data "$payload"
