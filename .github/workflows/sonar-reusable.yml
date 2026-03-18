@@ -54,9 +54,21 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          sleep 10
-          URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
-          RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
+          for i in $(seq 1 12); do
+            echo "Tentativa $i/12..."
+            URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
+            RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
+
+            LINES=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc")|.value//"0"' 2>/dev/null)
+
+            if [ -n "$LINES" ] && [ "$LINES" != "0" ] && [ "$LINES" != "null" ]; then
+              echo "✅ Dados disponíveis após $i tentativas"
+              break
+            fi
+
+            echo "Aguardando processamento... ($i/12)"
+            sleep 10
+          done
 
           get() {
             echo "$RESPONSE" | jq -r --arg k "$1" '.component.measures[]|select(.metric==$k)|.value//"0"' 2>/dev/null || echo "0"
@@ -65,14 +77,24 @@ jobs:
           LANG=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc_language_distribution")|.value//"?"' 2>/dev/null | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
           [ -z "$LANG" ] && LANG="?"
 
-          echo "bugs=$(get bugs)"                             >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$(get vulnerabilities)"       >> $GITHUB_OUTPUT
-          echo "code_smells=$(get code_smells)"               >> $GITHUB_OUTPUT
-          echo "coverage=$(get coverage)"                     >> $GITHUB_OUTPUT
-          echo "duplications=$(get duplicated_lines_density)" >> $GITHUB_OUTPUT
-          echo "lines=$(get ncloc)"                           >> $GITHUB_OUTPUT
-          echo "hotspots=$(get security_hotspots)"            >> $GITHUB_OUTPUT
-          echo "language=$LANG"                               >> $GITHUB_OUTPUT
+          BUGS=$(get bugs)
+          VULNS=$(get vulnerabilities)
+          SMELLS=$(get code_smells)
+          COVERAGE=$(get coverage)
+          DUPS=$(get duplicated_lines_density)
+          LINES=$(get ncloc)
+          HOTSPOTS=$(get security_hotspots)
+
+          echo "bugs=$BUGS"             >> $GITHUB_OUTPUT
+          echo "vulnerabilities=$VULNS" >> $GITHUB_OUTPUT
+          echo "code_smells=$SMELLS"    >> $GITHUB_OUTPUT
+          echo "coverage=$COVERAGE"     >> $GITHUB_OUTPUT
+          echo "duplications=$DUPS"     >> $GITHUB_OUTPUT
+          echo "lines=$LINES"           >> $GITHUB_OUTPUT
+          echo "hotspots=$HOTSPOTS"     >> $GITHUB_OUTPUT
+          echo "language=$LANG"         >> $GITHUB_OUTPUT
+
+          echo "✅ Bugs=$BUGS | Vulns=$VULNS | Smells=$SMELLS | Lines=$LINES | Lang=$LANG"
 
       - name: "✅ Slack — Sucesso"
         if: success()
