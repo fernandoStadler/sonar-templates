@@ -49,6 +49,23 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
+      - name: "🔎 Debug Métricas"
+        if: always()
+        run: |
+          echo "=== Testando conexão ==="
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/system/status"
+
+          echo ""
+          echo "=== Buscando métricas ==="
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,ncloc"
+
+          echo ""
+          echo "=== Verificando projeto ==="
+          curl -s -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/projects/search?projects=${{ inputs.sonar-project-key }}"
+
       - name: "📊 Buscar Métricas"
         id: metrics
         if: always()
@@ -58,14 +75,11 @@ jobs:
             echo "Tentativa $i/12..."
             URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
             RESPONSE=$(curl -s -u "${{ secrets.SONAR_TOKEN }}:" "$URL" || echo '{"component":{"measures":[]}}')
-
             LINES=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc")|.value//"0"' 2>/dev/null)
-
             if [ -n "$LINES" ] && [ "$LINES" != "0" ] && [ "$LINES" != "null" ]; then
               echo "✅ Dados disponíveis após $i tentativas"
               break
             fi
-
             echo "Aguardando processamento... ($i/12)"
             sleep 10
           done
@@ -77,24 +91,16 @@ jobs:
           LANG=$(echo "$RESPONSE" | jq -r '.component.measures[]|select(.metric=="ncloc_language_distribution")|.value//"?"' 2>/dev/null | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
           [ -z "$LANG" ] && LANG="?"
 
-          BUGS=$(get bugs)
-          VULNS=$(get vulnerabilities)
-          SMELLS=$(get code_smells)
-          COVERAGE=$(get coverage)
-          DUPS=$(get duplicated_lines_density)
-          LINES=$(get ncloc)
-          HOTSPOTS=$(get security_hotspots)
+          echo "bugs=$(get bugs)"                             >> $GITHUB_OUTPUT
+          echo "vulnerabilities=$(get vulnerabilities)"       >> $GITHUB_OUTPUT
+          echo "code_smells=$(get code_smells)"               >> $GITHUB_OUTPUT
+          echo "coverage=$(get coverage)"                     >> $GITHUB_OUTPUT
+          echo "duplications=$(get duplicated_lines_density)" >> $GITHUB_OUTPUT
+          echo "lines=$(get ncloc)"                           >> $GITHUB_OUTPUT
+          echo "hotspots=$(get security_hotspots)"            >> $GITHUB_OUTPUT
+          echo "language=$LANG"                               >> $GITHUB_OUTPUT
 
-          echo "bugs=$BUGS"             >> $GITHUB_OUTPUT
-          echo "vulnerabilities=$VULNS" >> $GITHUB_OUTPUT
-          echo "code_smells=$SMELLS"    >> $GITHUB_OUTPUT
-          echo "coverage=$COVERAGE"     >> $GITHUB_OUTPUT
-          echo "duplications=$DUPS"     >> $GITHUB_OUTPUT
-          echo "lines=$LINES"           >> $GITHUB_OUTPUT
-          echo "hotspots=$HOTSPOTS"     >> $GITHUB_OUTPUT
-          echo "language=$LANG"         >> $GITHUB_OUTPUT
-
-          echo "✅ Bugs=$BUGS | Vulns=$VULNS | Smells=$SMELLS | Lines=$LINES | Lang=$LANG"
+          echo "✅ Bugs=$(get bugs) | Smells=$(get code_smells) | Lines=$(get ncloc) | Lang=$LANG"
 
       - name: "✅ Slack — Sucesso"
         if: success()
@@ -103,42 +109,25 @@ jobs:
           -H "Content-Type: application/json" \
           -d '{
             "blocks": [
-              {
-                "type": "header",
-                "text": { "type": "plain_text", "text": "✅ Quality Gate PASSOU" }
-              },
-              {
-                "type": "section",
-                "fields": [
-                  { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
-                  { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
-                  { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
-                  { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
-                ]
-              },
-              {
-                "type": "section",
-                "fields": [
-                  { "type": "mrkdwn", "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}" },
-                  { "type": "mrkdwn", "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}" },
-                  { "type": "mrkdwn", "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}" },
-                  { "type": "mrkdwn", "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}" },
-                  { "type": "mrkdwn", "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%" },
-                  { "type": "mrkdwn", "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%" },
-                  { "type": "mrkdwn", "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}" }
-                ]
-              },
-              {
-                "type": "actions",
-                "elements": [
-                  {
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "🔗 Ver no SonarQube" },
-                    "url": "${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}",
-                    "style": "primary"
-                  }
-                ]
-              }
+              { "type": "header", "text": { "type": "plain_text", "text": "✅ Quality Gate PASSOU" } },
+              { "type": "section", "fields": [
+                { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
+                { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
+                { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
+                { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
+              ]},
+              { "type": "section", "fields": [
+                { "type": "mrkdwn", "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}" },
+                { "type": "mrkdwn", "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}" },
+                { "type": "mrkdwn", "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}" },
+                { "type": "mrkdwn", "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}" },
+                { "type": "mrkdwn", "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%" },
+                { "type": "mrkdwn", "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%" },
+                { "type": "mrkdwn", "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}" }
+              ]},
+              { "type": "actions", "elements": [
+                { "type": "button", "text": { "type": "plain_text", "text": "🔗 Ver no SonarQube" }, "url": "${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}", "style": "primary" }
+              ]}
             ]
           }'
 
@@ -149,40 +138,23 @@ jobs:
           -H "Content-Type: application/json" \
           -d '{
             "blocks": [
-              {
-                "type": "header",
-                "text": { "type": "plain_text", "text": "❌ Quality Gate FALHOU" }
-              },
-              {
-                "type": "section",
-                "fields": [
-                  { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
-                  { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
-                  { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
-                  { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
-                ]
-              },
-              {
-                "type": "section",
-                "fields": [
-                  { "type": "mrkdwn", "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}" },
-                  { "type": "mrkdwn", "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}" },
-                  { "type": "mrkdwn", "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}" },
-                  { "type": "mrkdwn", "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}" },
-                  { "type": "mrkdwn", "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%" },
-                  { "type": "mrkdwn", "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%" }
-                ]
-              },
-              {
-                "type": "actions",
-                "elements": [
-                  {
-                    "type": "button",
-                    "text": { "type": "plain_text", "text": "🔗 Ver Issues" },
-                    "url": "${{ secrets.SONAR_HOST_URL }}/project/issues?id=${{ inputs.sonar-project-key }}&resolved=false",
-                    "style": "danger"
-                  }
-                ]
-              }
+              { "type": "header", "text": { "type": "plain_text", "text": "❌ Quality Gate FALHOU" } },
+              { "type": "section", "fields": [
+                { "type": "mrkdwn", "text": "*Projeto:*\n${{ inputs.sonar-project-name }}" },
+                { "type": "mrkdwn", "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}" },
+                { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" },
+                { "type": "mrkdwn", "text": "*Autor:*\n${{ github.actor }}" }
+              ]},
+              { "type": "section", "fields": [
+                { "type": "mrkdwn", "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}" },
+                { "type": "mrkdwn", "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}" },
+                { "type": "mrkdwn", "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}" },
+                { "type": "mrkdwn", "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}" },
+                { "type": "mrkdwn", "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%" },
+                { "type": "mrkdwn", "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%" }
+              ]},
+              { "type": "actions", "elements": [
+                { "type": "button", "text": { "type": "plain_text", "text": "🔗 Ver Issues" }, "url": "${{ secrets.SONAR_HOST_URL }}/project/issues?id=${{ inputs.sonar-project-key }}&resolved=false", "style": "danger" }
+              ]}
             ]
           }'
