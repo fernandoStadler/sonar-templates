@@ -201,7 +201,7 @@ jobs:
                       "type": "plain_text",
                       "text": "🔗 Ver no SonarQube"
                     },
-                    "url": "${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}",
+                    "url": "${{ secrets.SONAR_HOST_URL }}dashboard?id=${{ inputs.sonar-project-key }}",
                     "style": "primary"
                   }
                 ]
