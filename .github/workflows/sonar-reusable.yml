@@ -1,4 +1,4 @@
-name: SonarQube Scan - Reusable 
+name: SonarQube Scan - Reusable
 
 on:
   workflow_call:
@@ -39,10 +39,11 @@ jobs:
             -Dsonar.projectKey=${{ inputs.sonar-project-key }}
             -Dsonar.projectName=${{ inputs.sonar-project-name }}
             -Dsonar.sources=.
-            -Dsonar.qualitygate.wait=true
 
       - name: "🚦 Quality Gate"
         id: quality-gate
+        if: success()
+        continue-on-error: true
         uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
@@ -57,55 +58,19 @@ jobs:
           set +e
 
           METRICS_URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
-
-          RESPONSE_FILE="$(mktemp)"
           BODY_FILE="$(mktemp)"
 
-          echo "Consultando métricas do projeto: ${{ inputs.sonar-project-key }}"
+          HTTP_CODE=$(curl -sS \
+            -u "${{ secrets.SONAR_TOKEN }}:" \
+            -o "$BODY_FILE" \
+            -w "%{http_code}" \
+            "$METRICS_URL")
 
-          success=0
-          for i in $(seq 1 12); do
-            echo "Tentativa $i/12..."
+          echo "HTTP_CODE=$HTTP_CODE"
 
-            HTTP_CODE=$(curl -sS \
-              -u "${{ secrets.SONAR_TOKEN }}:" \
-              -o "$BODY_FILE" \
-              -w "%{http_code}" \
-              "$METRICS_URL")
-
-            echo "HTTP_CODE=$HTTP_CODE"
-
-            if [ "$HTTP_CODE" = "200" ]; then
-              if jq -e '.component.measures' "$BODY_FILE" >/dev/null 2>&1; then
-                cp "$BODY_FILE" "$RESPONSE_FILE"
-
-                LINES=$(jq -r '.component.measures[]? | select(.metric=="ncloc") | .value // "0"' "$RESPONSE_FILE" 2>/dev/null)
-                if [ -n "$LINES" ] && [ "$LINES" != "null" ] && [ "$LINES" != "0" ]; then
-                  echo "✅ Métricas disponíveis após $i tentativa(s)"
-                  success=1
-                  break
-                fi
-
-                echo "Resposta JSON válida, mas análise ainda não consolidada."
-              else
-                echo "Resposta 200, mas não veio JSON esperado da API."
-                echo "Prévia da resposta:"
-                head -c 300 "$BODY_FILE" || true
-                echo
-              fi
-            else
-              echo "Resposta HTTP inesperada: $HTTP_CODE"
-              echo "Prévia da resposta:"
-              head -c 300 "$BODY_FILE" || true
-              echo
-            fi
-
-            sleep 10
-          done
-
-          if [ "$success" -ne 1 ]; then
-            echo "⚠️ Não foi possível obter métricas consolidadas. Usando fallback seguro."
-            echo '{"component":{"measures":[]}}' > "$RESPONSE_FILE"
+          if [ "$HTTP_CODE" != "200" ] || ! jq -e '.component.measures' "$BODY_FILE" >/dev/null 2>&1; then
+            echo "⚠️ Falha ao obter métricas. Usando fallback."
+            echo '{"component":{"measures":[]}}' > "$BODY_FILE"
           fi
 
           get_metric() {
@@ -113,11 +78,11 @@ jobs:
             local value
             value=$(jq -r --arg k "$key" '
               [
-                .component.measures[]? 
-                | select(.metric == $k) 
+                .component.measures[]?
+                | select(.metric == $k)
                 | .value
               ][0] // "0"
-            ' "$RESPONSE_FILE" 2>/dev/null)
+            ' "$BODY_FILE" 2>/dev/null)
 
             if [ -z "$value" ] || [ "$value" = "null" ]; then
               value="0"
@@ -132,7 +97,7 @@ jobs:
               | select(.metric=="ncloc_language_distribution")
               | .value
             ][0] // ""
-          ' "$RESPONSE_FILE" 2>/dev/null)
+          ' "$BODY_FILE" 2>/dev/null)
 
           if [ -n "$LANGUAGE" ] && [ "$LANGUAGE" != "null" ]; then
             LANGUAGE=$(echo "$LANGUAGE" | cut -d';' -f1 | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
@@ -159,18 +124,8 @@ jobs:
           echo "hotspots=$HOTSPOTS" >> "$GITHUB_OUTPUT"
           echo "language=$LANGUAGE" >> "$GITHUB_OUTPUT"
 
-          echo "Resumo final:"
-          echo "bugs=$BUGS"
-          echo "vulnerabilities=$VULNERABILITIES"
-          echo "code_smells=$CODE_SMELLS"
-          echo "coverage=$COVERAGE"
-          echo "duplications=$DUPLICATIONS"
-          echo "lines=$LINES"
-          echo "hotspots=$HOTSPOTS"
-          echo "language=$LANGUAGE"
-
       - name: "✅ Slack — Sucesso"
-        if: success()
+        if: always() && steps.sonar.outcome == 'success' && steps.quality-gate.outputs.quality-gate-status == 'PASSED'
         shell: bash
         run: |
           payload=$(cat <<EOF
@@ -261,9 +216,14 @@ jobs:
             --data "$payload"
 
       - name: "❌ Slack — Falha"
-        if: failure()
+        if: always() && (steps.sonar.outcome != 'success' || steps.quality-gate.outputs.quality-gate-status != 'PASSED')
         shell: bash
         run: |
+          STATUS="${{ steps.quality-gate.outputs.quality-gate-status }}"
+          if [ -z "$STATUS" ]; then
+            STATUS="SCAN_ERROR"
+          fi
+
           payload=$(cat <<EOF
           {
             "blocks": [
@@ -292,6 +252,10 @@ jobs:
                   {
                     "type": "mrkdwn",
                     "text": "*Autor:*\n${{ github.actor }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Status:*\n$STATUS"
                   }
                 ]
               },
@@ -350,3 +314,10 @@ jobs:
           curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             --data "$payload"
+
+      - name: "⛔ Falhar job se o Quality Gate falhou"
+        if: always() && steps.sonar.outcome == 'success' && steps.quality-gate.outputs.quality-gate-status != 'PASSED'
+        shell: bash
+        run: |
+          echo "Quality Gate status: ${{ steps.quality-gate.outputs.quality-gate-status }}"
+          exit 1
