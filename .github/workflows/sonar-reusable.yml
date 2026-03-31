@@ -20,6 +20,14 @@ on:
       SONAR_HOST_URL:
         required: true
 
+    outputs:
+      quality_gate_status:
+        description: "Status do Quality Gate"
+        value: ${{ jobs.sonar.outputs.quality_gate_status }}
+      dashboard_url:
+        description: "URL do dashboard do SonarQube"
+        value: ${{ jobs.sonar.outputs.dashboard_url }}
+
 jobs:
   sonar:
     runs-on: ubuntu-latest
@@ -46,12 +54,12 @@ jobs:
           curl -fsSL -o scanner.zip \
             https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.1.0.4477-linux-x64.zip
           unzip -q scanner.zip
-          echo "$PWD/sonar-scanner-6.1.0.4477-linux-x64/bin" >> $GITHUB_PATH
+          echo "$PWD/sonar-scanner-6.1.0.4477-linux-x64/bin" >> "$GITHUB_PATH"
 
       - name: Prepare metadata
         id: meta
         run: |
-          echo "dashboard_url=${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}" >> $GITHUB_OUTPUT
+          echo "dashboard_url=${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}" >> "$GITHUB_OUTPUT"
 
       - name: Run Sonar
         env:
@@ -86,7 +94,7 @@ jobs:
             sleep 5
           done
 
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
 
           if [ "$STATUS" = "ERROR" ]; then
             exit 1
