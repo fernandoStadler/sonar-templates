@@ -1,248 +1,149 @@
-parameters:
-  - name: sonarProjectKey
-    type: string
-  - name: sonarProjectName
-    type: string
-  - name: sonarHostUrl
-    type: string
-    default: "http://localhost:9000"
-  - name: sonarTokenSecret
-    type: string
-    default: "SONAR_TOKEN"
-  - name: buildCommand
-    type: string
-    default: ""
-  - name: extraSonarProperties
-    type: string
-    default: ""
-  - name: nodeVersion
-    type: string
-    default: "18.x"
-  - name: javaVersion
-    type: string
-    default: "17"
-  - name: dotnetVersion
-    type: string
-    default: "7.x"
+name: Sonar Reusable
 
-steps:
+on:
+  workflow_call:
+    inputs:
+      sonar-project-key:
+        required: true
+        type: string
+      sonar-project-name:
+        required: true
+        type: string
+      extra-sonar-properties:
+        required: false
+        type: string
+        default: ""
 
-  - powershell: |
-      Write-Host "Detectando linguagem do projeto..."
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
 
-      $javaCount   = (Get-ChildItem -Recurse -Include "*.java","*.kt","pom.xml","build.gradle" -ErrorAction SilentlyContinue).Count
-      $csharpCount = (Get-ChildItem -Recurse -Include "*.cs","*.csproj","*.sln" -ErrorAction SilentlyContinue).Count
-      $jsCount     = (Get-ChildItem -Recurse -Include "*.js","*.ts","*.jsx","*.tsx","package.json" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike "*node_modules*" }).Count
-      $pythonCount = (Get-ChildItem -Recurse -Include "*.py" -ErrorAction SilentlyContinue).Count
-      $phpCount    = (Get-ChildItem -Recurse -Include "*.php" -ErrorAction SilentlyContinue).Count
-      $goCount     = (Get-ChildItem -Recurse -Include "*.go" -ErrorAction SilentlyContinue).Count
-      $rubyCount   = (Get-ChildItem -Recurse -Include "*.rb" -ErrorAction SilentlyContinue).Count
-      $cppCount    = (Get-ChildItem -Recurse -Include "*.cpp","*.c","*.h" -ErrorAction SilentlyContinue).Count
-      $tsCount     = (Get-ChildItem -Recurse -Include "*.ts","*.tsx" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notlike "*node_modules*" }).Count
+    outputs:
+      quality-gate-status:
+        description: "Status do Quality Gate"
+        value: ${{ jobs.sonar.outputs.quality_gate_status }}
+      dashboard-url:
+        description: "URL do dashboard do SonarQube"
+        value: ${{ jobs.sonar.outputs.dashboard_url }}
 
-      Write-Host "Java:   $javaCount"
-      Write-Host "C#:     $csharpCount"
-      Write-Host "JS/TS:  $jsCount"
-      Write-Host "Python: $pythonCount"
-      Write-Host "PHP:    $phpCount"
-      Write-Host "Go:     $goCount"
-      Write-Host "Ruby:   $rubyCount"
-      Write-Host "C/C++:  $cppCount"
+jobs:
+  sonar:
+    runs-on: ubuntu-latest
 
-      $counts = @{
-        "java"       = $javaCount
-        "csharp"     = $csharpCount
-        "javascript" = $jsCount
-        "python"     = $pythonCount
-        "php"        = $phpCount
-        "go"         = $goCount
-        "ruby"       = $rubyCount
-        "cpp"        = $cppCount
-      }
+    outputs:
+      quality_gate_status: ${{ steps.quality-gate.outputs.status }}
+      dashboard_url: ${{ steps.meta.outputs.dashboard_url }}
 
-      $lang = "generic"
-      $max  = 0
-      foreach ($entry in $counts.GetEnumerator()) {
-        if ($entry.Value -gt $max) {
-          $max  = $entry.Value
-          $lang = $entry.Key
-        }
-      }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      if ($lang -eq "javascript" -and $tsCount -gt 0) {
-        $lang = "typescript"
-      }
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      Write-Host "Linguagem detectada: $lang"
-      Write-Host "##vso[task.setvariable variable=DETECTED_LANGUAGE;isOutput=true]$lang"
-      Write-Host "##vso[task.setvariable variable=DETECTED_LANGUAGE]$lang"
-    displayName: "🔍 Detectar Linguagem do Projeto"
-    name: detectLang
+      - name: Cache SonarScanner
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/sonar-scanner
+          key: sonar-scanner-linux-x64-6.1.0.4477
 
-  - powershell: |
-      $lang      = "$(DETECTED_LANGUAGE)"
-      $customCmd = "${{ parameters.buildCommand }}"
+      - name: Install SonarScanner
+        run: |
+          set -euo pipefail
 
-      if ($customCmd -ne "") {
-        Write-Host "Executando build customizado: $customCmd"
-        Invoke-Expression $customCmd
-        exit 0
-      }
+          SCANNER_VERSION="6.1.0.4477"
+          SCANNER_DIR="$HOME/.sonar/sonar-scanner"
 
-      Write-Host "Build para linguagem: $lang"
+          if [ -x "$SCANNER_DIR/bin/sonar-scanner" ]; then
+            echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
+            exit 0
+          fi
 
-      switch ($lang) {
-        "java" {
-          if (Test-Path "pom.xml") {
-            mvn clean verify -DskipTests --batch-mode
-          } elseif (Test-Path "build.gradle") {
-            .\gradlew build -x test
-          }
-        }
-        "csharp" {
-          $sln = Get-ChildItem -Filter "*.sln" | Select-Object -First 1
-          if ($sln) {
-            dotnet restore
-            dotnet build --no-restore
-          } else {
-            $csproj = Get-ChildItem -Recurse -Filter "*.csproj" | Select-Object -First 1
-            if ($csproj) { dotnet build $csproj.FullName }
-          }
-        }
-        { $_ -in "javascript","typescript" } {
-          if (Test-Path "package.json") {
-            npm ci
-            $pkg = Get-Content "package.json" | ConvertFrom-Json
-            if ($pkg.scripts.build) { npm run build }
-          }
-        }
-        "python" {
-          if (Test-Path "requirements.txt") {
-            pip install -r requirements.txt
-          }
-        }
-        default {
-          Write-Host "Sem build necessário para: $lang"
-        }
-      }
+          mkdir -p "$HOME/.sonar"
+          curl -fsSL -o /tmp/sonar-scanner.zip \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER_VERSION}-linux-x64.zip"
+          unzip -q /tmp/sonar-scanner.zip -d /tmp
+          rm -rf "$SCANNER_DIR"
+          mv "/tmp/sonar-scanner-${SCANNER_VERSION}-linux-x64" "$SCANNER_DIR"
+          echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
 
-      Write-Host "Build finalizado"
-    displayName: "🔨 Build do Projeto"
-    continueOnError: true
+      - name: Prepare metadata
+        id: meta
+        run: |
+          echo "dashboard_url=${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}" >> "$GITHUB_OUTPUT"
 
-  - powershell: |
-      $sonarVersion = "5.0.1.3006"
-      $installDir   = "$env:USERPROFILE\.sonar\sonar-scanner"
+      - name: Run SonarQube scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          EXTRA_SONAR_PROPERTIES: ${{ inputs.extra-sonar-properties }}
+        run: |
+          set -euo pipefail
 
-      if (Test-Path "$installDir\bin\sonar-scanner.bat") {
-        Write-Host "sonar-scanner já instalado"
-        Write-Host "##vso[task.prependpath]$installDir\bin"
-        exit 0
-      }
+          ARGS=(
+            "-Dsonar.projectKey=${{ inputs.sonar-project-key }}"
+            "-Dsonar.projectName=${{ inputs.sonar-project-name }}"
+            "-Dsonar.host.url=${SONAR_HOST_URL}"
+            "-Dsonar.token=${SONAR_TOKEN}"
+            "-Dsonar.sources=."
+            "-Dsonar.scm.provider=git"
+            "-Dsonar.sourceEncoding=UTF-8"
+          )
 
-      Write-Host "Baixando sonar-scanner $sonarVersion..."
-      New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.sonar" | Out-Null
+          if [ -n "${EXTRA_SONAR_PROPERTIES}" ]; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && ARGS+=("$line")
+            done <<< "${EXTRA_SONAR_PROPERTIES}"
+          fi
 
-      $url     = "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-$sonarVersion-windows.zip"
-      $zipFile = "$env:TEMP\sonar-scanner.zip"
+          sonar-scanner "${ARGS[@]}"
 
-      Invoke-WebRequest -Uri $url -OutFile $zipFile
-      Expand-Archive -Path $zipFile -DestinationPath "$env:TEMP\sonar-extract" -Force
+      - name: Wait for Quality Gate
+        id: quality-gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PROJECT_KEY: ${{ inputs.sonar-project-key }}
+        run: |
+          set -euo pipefail
 
-      if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
-      Move-Item "$env:TEMP\sonar-extract\sonar-scanner-$sonarVersion-windows" $installDir
+          STATUS="NONE"
 
-      Write-Host "##vso[task.prependpath]$installDir\bin"
-      Write-Host "Instalado em: $installDir"
-    displayName: "📦 Instalar sonar-scanner CLI"
+          for i in $(seq 1 30); do
+            RESPONSE="$(curl -sS -u "${SONAR_TOKEN}:" \
+              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" || true)"
 
-  - powershell: |
-      $sonarCmd    = "$env:USERPROFILE\.sonar\sonar-scanner\bin\sonar-scanner.bat"
-      $projectKey  = "${{ parameters.sonarProjectKey }}"
-      $projectName = "${{ parameters.sonarProjectName }}"
-      $sonarUrl    = "${{ parameters.sonarHostUrl }}"
-      $extra       = "${{ parameters.extraSonarProperties }}"
-      $lang        = "$(DETECTED_LANGUAGE)"
-      $sonarToken  = $env:SONAR_TOKEN
+            STATUS="$(python3 -c 'import json,sys
+raw=sys.argv[1]
+try:
+    data=json.loads(raw) if raw else {}
+    print(data.get("projectStatus",{}).get("status","NONE"))
+except Exception:
+    print("NONE")' "$RESPONSE")"
 
-      if (-not (Test-Path $sonarCmd)) {
-        Write-Host "##[error]sonar-scanner.bat não encontrado em: $sonarCmd"
-        exit 1
-      }
+            echo "Tentativa ${i}/30 - Quality Gate: ${STATUS}"
 
-      Write-Host "Projeto:   $projectKey"
-      Write-Host "Linguagem: $lang"
-      Write-Host "Servidor:  $sonarUrl"
+            if [ "$STATUS" != "NONE" ] && [ "$STATUS" != "PENDING" ]; then
+              break
+            fi
 
-      $langProps = switch ($lang) {
-        "java"       { "-Dsonar.language=java" }
-        "csharp"     { "-Dsonar.language=cs" }
-        "javascript" { "-Dsonar.language=js" }
-        "typescript" { "-Dsonar.language=ts" }
-        "python"     { "-Dsonar.language=py" }
-        "php"        { "-Dsonar.language=php" }
-        "go"         { "-Dsonar.language=go" }
-        "ruby"       { "-Dsonar.language=ruby" }
-        "cpp"        { "-Dsonar.language=c++" }
-        default      { "" }
-      }
+            sleep 10
+          done
 
-      $args = @(
-        "-Dsonar.projectKey=$projectKey",
-        "-Dsonar.projectName=$projectName",
-        "-Dsonar.host.url=$sonarUrl",
-        "-Dsonar.token=$sonarToken",
-        "-Dsonar.sources=.",
-        "-Dsonar.scm.provider=git",
-        "-Dsonar.sourceEncoding=UTF-8"
-      )
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
 
-      if ($langProps -ne "") { $args += $langProps }
-      if ($extra -ne "")     { $args += $extra }
-
-      & $sonarCmd $args
-
-      Write-Host "✅ Análise concluída!"
-    env:
-      SONAR_TOKEN: $(SONAR_TOKEN)
-    displayName: "📊 Executar Análise SonarQube"
-
-  - powershell: |
-      $sonarUrl   = "${{ parameters.sonarHostUrl }}"
-      $projectKey = "${{ parameters.sonarProjectKey }}"
-      $sonarToken = $env:SONAR_TOKEN
-      $status     = "NONE"
-
-      Write-Host "Verificando Quality Gate para: $projectKey"
-
-      for ($i = 1; $i -le 30; $i++) {
-        try {
-          $base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("${sonarToken}:"))
-          $headers = @{ Authorization = "Basic $base64" }
-          $response = Invoke-RestMethod -Uri "$sonarUrl/api/qualitygates/project_status?projectKey=$projectKey" -Headers $headers
-          $status = $response.projectStatus.status
-        } catch {
-          $status = "NONE"
-        }
-
-        if ($status -ne "NONE" -and $status -ne "PENDING") { break }
-
-        Write-Host "Aguardando... ($i/30)"
-        Start-Sleep -Seconds 10
-      }
-
-      Write-Host "Quality Gate: $status"
-
-      if ($status -eq "OK" -or $status -eq "SUCCESS") {
-        Write-Host "##[section]✅ Quality Gate: PASSOU"
-      } elseif ($status -eq "ERROR") {
-        Write-Host "##vso[task.complete result=Failed;]Quality Gate FALHOU"
-        exit 1
-      } else {
-        Write-Host "##vso[task.logissue type=warning]⚠️ Status: $status"
-      }
-
-      Write-Host "🔗 $sonarUrl/dashboard?id=$projectKey"
-    env:
-      SONAR_TOKEN: $(SONAR_TOKEN)
-    displayName: "🚦 Verificar Quality Gate"
+          if [ "$STATUS" = "OK" ] || [ "$STATUS" = "SUCCESS" ]; then
+            echo "✅ Quality Gate passou"
+          elif [ "$STATUS" = "ERROR" ]; then
+            echo "❌ Quality Gate falhou"
+            exit 1
+          else
+            echo "⚠️ Status final inesperado: ${STATUS}"
+          fi
