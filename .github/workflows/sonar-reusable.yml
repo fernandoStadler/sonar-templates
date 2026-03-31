@@ -30,6 +30,7 @@ on:
 
 jobs:
   sonar:
+    name: SonarQube Analysis
     runs-on: ubuntu-latest
 
     outputs:
@@ -48,54 +49,115 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Cache SonarScanner
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/sonar-scanner
+          key: sonar-scanner-linux-x64-6.1.0.4477
+
       - name: Install SonarScanner
+        shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL -o scanner.zip \
-            https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-6.1.0.4477-linux-x64.zip
-          unzip -q scanner.zip
-          echo "$PWD/sonar-scanner-6.1.0.4477-linux-x64/bin" >> "$GITHUB_PATH"
+
+          SCANNER_VERSION="6.1.0.4477"
+          SCANNER_DIR="$HOME/.sonar/sonar-scanner"
+
+          if [ -x "$SCANNER_DIR/bin/sonar-scanner" ]; then
+            echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
+            exit 0
+          fi
+
+          mkdir -p "$HOME/.sonar"
+          curl -fsSL -o /tmp/sonar-scanner.zip \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER_VERSION}-linux-x64.zip"
+          unzip -q /tmp/sonar-scanner.zip -d /tmp
+          rm -rf "$SCANNER_DIR"
+          mv "/tmp/sonar-scanner-${SCANNER_VERSION}-linux-x64" "$SCANNER_DIR"
+          echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
 
       - name: Prepare metadata
         id: meta
+        shell: bash
         run: |
           echo "dashboard_url=${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}" >> "$GITHUB_OUTPUT"
 
-      - name: Run Sonar
+      - name: Run SonarQube scan
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          EXTRA_SONAR_PROPERTIES: ${{ inputs.extra-sonar-properties }}
+        shell: bash
         run: |
-          sonar-scanner \
-            -Dsonar.projectKey=${{ inputs.sonar-project-key }} \
-            -Dsonar.projectName=${{ inputs.sonar-project-name }} \
-            -Dsonar.host.url=${SONAR_HOST_URL} \
-            -Dsonar.token=${SONAR_TOKEN} \
-            -Dsonar.sources=.
+          set -euo pipefail
 
-      - name: Quality Gate
+          ARGS=(
+            "-Dsonar.projectKey=${{ inputs.sonar-project-key }}"
+            "-Dsonar.projectName=${{ inputs.sonar-project-name }}"
+            "-Dsonar.host.url=${SONAR_HOST_URL}"
+            "-Dsonar.token=${SONAR_TOKEN}"
+            "-Dsonar.sources=."
+            "-Dsonar.scm.provider=git"
+            "-Dsonar.sourceEncoding=UTF-8"
+          )
+
+          if [ -n "${EXTRA_SONAR_PROPERTIES}" ]; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && ARGS+=("$line")
+            done <<< "${EXTRA_SONAR_PROPERTIES}"
+          fi
+
+          sonar-scanner "${ARGS[@]}"
+
+      - name: Wait for Quality Gate
         id: quality_gate
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PROJECT_KEY: ${{ inputs.sonar-project-key }}
+        shell: bash
         run: |
+          set -euo pipefail
+
           STATUS="NONE"
+          MAX_ATTEMPTS=12
+          SLEEP_SECONDS=5
 
-          for i in $(seq 1 20); do
-            RESPONSE=$(curl -s -u "${SONAR_TOKEN}:" \
-              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${{ inputs.sonar-project-key }}")
+          for i in $(seq 1 "$MAX_ATTEMPTS"); do
+            RESPONSE="$(curl -fsS -u "${SONAR_TOKEN}:" \
+              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" \
+              || true)"
 
-            STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['projectStatus']['status'])" 2>/dev/null || echo NONE)
+            STATUS="$(echo "$RESPONSE" | jq -r '.projectStatus.status // "NONE"' 2>/dev/null || echo "NONE")"
 
-            if [ "$STATUS" != "NONE" ] && [ "$STATUS" != "PENDING" ]; then
-              break
-            fi
+            echo "Tentativa ${i}/${MAX_ATTEMPTS} - Quality Gate: ${STATUS}"
 
-            sleep 5
+            case "$STATUS" in
+              OK|SUCCESS|ERROR)
+                break
+                ;;
+              NONE|PENDING)
+                sleep "$SLEEP_SECONDS"
+                ;;
+              *)
+                echo "Status inesperado recebido: ${STATUS}"
+                sleep "$SLEEP_SECONDS"
+                ;;
+            esac
           done
 
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
 
-          if [ "$STATUS" = "ERROR" ]; then
-            exit 1
-          fi
+          case "$STATUS" in
+            OK|SUCCESS)
+              echo "✅ Quality Gate passou"
+              ;;
+            ERROR)
+              echo "❌ Quality Gate falhou"
+              exit 1
+              ;;
+            *)
+              echo "⚠️ Quality Gate não ficou pronto a tempo: ${STATUS}"
+              exit 1
+              ;;
+          esac
