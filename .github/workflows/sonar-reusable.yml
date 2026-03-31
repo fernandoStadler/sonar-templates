@@ -1,4 +1,4 @@
-name: SonarQube Scan - Reusable
+name: Sonar Reusable
 
 on:
   workflow_call:
@@ -9,315 +9,141 @@ on:
       sonar-project-name:
         required: true
         type: string
+      extra-sonar-properties:
+        required: false
+        type: string
+        default: ""
+
     secrets:
       SONAR_TOKEN:
         required: true
       SONAR_HOST_URL:
         required: true
-      SLACK_WEBHOOK_URL:
-        required: true
+
+    outputs:
+      quality-gate-status:
+        description: "Status do Quality Gate"
+        value: ${{ jobs.sonar.outputs.quality_gate_status }}
+      dashboard-url:
+        description: "URL do dashboard do SonarQube"
+        value: ${{ jobs.sonar.outputs.dashboard_url }}
 
 jobs:
-  sonar-scan:
-    name: "🔍 SonarQube Scan"
+  sonar:
     runs-on: ubuntu-latest
 
+    outputs:
+      quality_gate_status: ${{ steps.quality-gate.outputs.status }}
+      dashboard_url: ${{ steps.meta.outputs.dashboard_url }}
+
     steps:
-      - name: "📥 Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: "📊 SonarQube Scan"
-        id: sonar
-        uses: sonarsource/sonarqube-scan-action@v3
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
-          args: >
-            -Dsonar.projectKey=${{ inputs.sonar-project-key }}
-            -Dsonar.projectName=${{ inputs.sonar-project-name }}
-            -Dsonar.sources=.
+          distribution: temurin
+          java-version: '17'
 
-      - name: "🚦 Quality Gate"
-        id: quality-gate
-        if: success()
-        continue-on-error: true
-        uses: sonarsource/sonarqube-quality-gate-action@master
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Cache SonarScanner
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/sonar-scanner
+          key: sonar-scanner-linux-x64-6.1.0.4477
 
-      - name: "📊 Buscar Métricas"
-        id: metrics
-        if: always()
-        shell: bash
+      - name: Install SonarScanner
         run: |
-          set +e
+          set -euo pipefail
 
-          METRICS_URL="${{ secrets.SONAR_HOST_URL }}/api/measures/component?component=${{ inputs.sonar-project-key }}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,ncloc,security_hotspots,ncloc_language_distribution"
-          BODY_FILE="$(mktemp)"
+          SCANNER_VERSION="6.1.0.4477"
+          SCANNER_DIR="$HOME/.sonar/sonar-scanner"
 
-          HTTP_CODE=$(curl -sS \
-            -u "${{ secrets.SONAR_TOKEN }}:" \
-            -o "$BODY_FILE" \
-            -w "%{http_code}" \
-            "$METRICS_URL")
-
-          echo "HTTP_CODE=$HTTP_CODE"
-
-          if [ "$HTTP_CODE" != "200" ] || ! jq -e '.component.measures' "$BODY_FILE" >/dev/null 2>&1; then
-            echo "⚠️ Falha ao obter métricas. Usando fallback."
-            echo '{"component":{"measures":[]}}' > "$BODY_FILE"
+          if [ -x "$SCANNER_DIR/bin/sonar-scanner" ]; then
+            echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
+            exit 0
           fi
 
-          get_metric() {
-            local key="$1"
-            local value
-            value=$(jq -r --arg k "$key" '
-              [
-                .component.measures[]?
-                | select(.metric == $k)
-                | .value
-              ][0] // "0"
-            ' "$BODY_FILE" 2>/dev/null)
+          mkdir -p "$HOME/.sonar"
+          curl -fsSL -o /tmp/sonar-scanner.zip \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SCANNER_VERSION}-linux-x64.zip"
+          unzip -q /tmp/sonar-scanner.zip -d /tmp
+          rm -rf "$SCANNER_DIR"
+          mv "/tmp/sonar-scanner-${SCANNER_VERSION}-linux-x64" "$SCANNER_DIR"
+          echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
 
-            if [ -z "$value" ] || [ "$value" = "null" ]; then
-              value="0"
+      - name: Prepare metadata
+        id: meta
+        run: |
+          echo "dashboard_url=${{ secrets.SONAR_HOST_URL }}/dashboard?id=${{ inputs.sonar-project-key }}" >> "$GITHUB_OUTPUT"
+
+      - name: Run SonarQube scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          EXTRA_SONAR_PROPERTIES: ${{ inputs.extra-sonar-properties }}
+        run: |
+          set -euo pipefail
+
+          ARGS=(
+            "-Dsonar.projectKey=${{ inputs.sonar-project-key }}"
+            "-Dsonar.projectName=${{ inputs.sonar-project-name }}"
+            "-Dsonar.host.url=${SONAR_HOST_URL}"
+            "-Dsonar.token=${SONAR_TOKEN}"
+            "-Dsonar.sources=."
+            "-Dsonar.scm.provider=git"
+            "-Dsonar.sourceEncoding=UTF-8"
+          )
+
+          if [ -n "${EXTRA_SONAR_PROPERTIES}" ]; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && ARGS+=("$line")
+            done <<< "${EXTRA_SONAR_PROPERTIES}"
+          fi
+
+          sonar-scanner "${ARGS[@]}"
+
+      - name: Wait for Quality Gate
+        id: quality-gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          PROJECT_KEY: ${{ inputs.sonar-project-key }}
+        run: |
+          set -euo pipefail
+
+          STATUS="NONE"
+
+          for i in $(seq 1 30); do
+            RESPONSE="$(curl -sS -u "${SONAR_TOKEN}:" \
+              "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" || true)"
+
+            STATUS="$(python3 -c 'import json,sys
+raw=sys.argv[1]
+try:
+    data=json.loads(raw) if raw else {}
+    print(data.get("projectStatus",{}).get("status","NONE"))
+except Exception:
+    print("NONE")' "$RESPONSE")"
+
+            echo "Tentativa ${i}/30 - Quality Gate: ${STATUS}"
+
+            if [ "$STATUS" != "NONE" ] && [ "$STATUS" != "PENDING" ]; then
+              break
             fi
 
-            echo "$value"
-          }
+            sleep 10
+          done
 
-          LANGUAGE=$(jq -r '
-            [
-              .component.measures[]?
-              | select(.metric=="ncloc_language_distribution")
-              | .value
-            ][0] // ""
-          ' "$BODY_FILE" 2>/dev/null)
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
 
-          if [ -n "$LANGUAGE" ] && [ "$LANGUAGE" != "null" ]; then
-            LANGUAGE=$(echo "$LANGUAGE" | cut -d';' -f1 | cut -d'=' -f1 | tr '[:lower:]' '[:upper:]')
+          if [ "$STATUS" = "OK" ] || [ "$STATUS" = "SUCCESS" ]; then
+            echo "✅ Quality Gate passou"
+          elif [ "$STATUS" = "ERROR" ]; then
+            echo "❌ Quality Gate falhou"
+            exit 1
+          else
+            echo "⚠️ Status final inesperado: ${STATUS}"
           fi
-
-          if [ -z "$LANGUAGE" ] || [ "$LANGUAGE" = "null" ]; then
-            LANGUAGE="?"
-          fi
-
-          BUGS="$(get_metric bugs)"
-          VULNERABILITIES="$(get_metric vulnerabilities)"
-          CODE_SMELLS="$(get_metric code_smells)"
-          COVERAGE="$(get_metric coverage)"
-          DUPLICATIONS="$(get_metric duplicated_lines_density)"
-          LINES="$(get_metric ncloc)"
-          HOTSPOTS="$(get_metric security_hotspots)"
-
-          echo "bugs=$BUGS" >> "$GITHUB_OUTPUT"
-          echo "vulnerabilities=$VULNERABILITIES" >> "$GITHUB_OUTPUT"
-          echo "code_smells=$CODE_SMELLS" >> "$GITHUB_OUTPUT"
-          echo "coverage=$COVERAGE" >> "$GITHUB_OUTPUT"
-          echo "duplications=$DUPLICATIONS" >> "$GITHUB_OUTPUT"
-          echo "lines=$LINES" >> "$GITHUB_OUTPUT"
-          echo "hotspots=$HOTSPOTS" >> "$GITHUB_OUTPUT"
-          echo "language=$LANGUAGE" >> "$GITHUB_OUTPUT"
-
-      - name: "✅ Slack — Sucesso"
-        if: always() && steps.sonar.outcome == 'success' && steps.quality-gate.outputs.quality-gate-status == 'PASSED'
-        shell: bash
-        run: |
-          payload=$(cat <<EOF
-          {
-            "blocks": [
-              {
-                "type": "header",
-                "text": {
-                  "type": "plain_text",
-                  "text": "✅ Quality Gate PASSOU"
-                }
-              },
-              {
-                "type": "section",
-                "fields": [
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Projeto:*\n${{ inputs.sonar-project-name }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Branch:*\n${{ github.ref_name }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Autor:*\n${{ github.actor }}"
-                  }
-                ]
-              },
-              {
-                "type": "section",
-                "fields": [
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}"
-                  }
-                ]
-              },
-              {
-                "type": "actions",
-                "elements": [
-                  {
-                    "type": "button",
-                    "text": {
-                      "type": "plain_text",
-                      "text": "🔗 Ver no SonarQube"
-                    },
-                    "url": "${{ secrets.SONAR_HOST_URL }}dashboard?id=${{ inputs.sonar-project-key }}",
-                    "style": "primary"
-                  }
-                ]
-              }
-            ]
-          }
-          EOF
-          )
-
-          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            --data "$payload"
-
-      - name: "❌ Slack — Falha"
-        if: always() && (steps.sonar.outcome != 'success' || steps.quality-gate.outputs.quality-gate-status != 'PASSED')
-        shell: bash
-        run: |
-          STATUS="${{ steps.quality-gate.outputs.quality-gate-status }}"
-          if [ -z "$STATUS" ]; then
-            STATUS="SCAN_ERROR"
-          fi
-
-          payload=$(cat <<EOF
-          {
-            "blocks": [
-              {
-                "type": "header",
-                "text": {
-                  "type": "plain_text",
-                  "text": "❌ Quality Gate FALHOU"
-                }
-              },
-              {
-                "type": "section",
-                "fields": [
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Projeto:*\n${{ inputs.sonar-project-name }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Linguagem:*\n${{ steps.metrics.outputs.language }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Branch:*\n${{ github.ref_name }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Autor:*\n${{ github.actor }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*Status:*\n$STATUS"
-                  }
-                ]
-              },
-              {
-                "type": "section",
-                "fields": [
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🐛 Bugs:*\n${{ steps.metrics.outputs.bugs }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🔒 Vulnerabilities:*\n${{ steps.metrics.outputs.vulnerabilities }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🔥 Code Smells:*\n${{ steps.metrics.outputs.code_smells }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*🛡️ Hotspots:*\n${{ steps.metrics.outputs.hotspots }}"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*📊 Coverage:*\n${{ steps.metrics.outputs.coverage }}%"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*📋 Duplications:*\n${{ steps.metrics.outputs.duplications }}%"
-                  },
-                  {
-                    "type": "mrkdwn",
-                    "text": "*📝 Lines:*\n${{ steps.metrics.outputs.lines }}"
-                  }
-                ]
-              },
-              {
-                "type": "actions",
-                "elements": [
-                  {
-                    "type": "button",
-                    "text": {
-                      "type": "plain_text",
-                      "text": "🔗 Ver Issues"
-                    },
-                    "url": "${{ secrets.SONAR_HOST_URL }}/project/issues?id=${{ inputs.sonar-project-key }}&resolved=false",
-                    "style": "danger"
-                  }
-                ]
-              }
-            ]
-          }
-          EOF
-          )
-
-          curl -sS -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            --data "$payload"
-
-      - name: "⛔ Falhar job se o Quality Gate falhou"
-        if: always() && steps.sonar.outcome == 'success' && steps.quality-gate.outputs.quality-gate-status != 'PASSED'
-        shell: bash
-        run: |
-          echo "Quality Gate status: ${{ steps.quality-gate.outputs.quality-gate-status }}"
-          exit 1
